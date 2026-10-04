@@ -6,13 +6,6 @@ on:
     tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
-    inputs:
-      roothide:
-        description: '同时构建 RootHide (roothide/theos, arm64e) 版本'
-        required: false
-        default: 'false'
-        type: choice
-        options: [ 'false', 'true' ]
 
 permissions:
   contents: write
@@ -235,16 +228,15 @@ jobs:
             > 未在真机上验证过，请先在可恢复的设备上试。
 
   # ---------------------------------------------------------------------------
-  # RootHide 构建：需要 roothide 的 Theos 分支与 arm64e。该分支节奏与上游不同步，
-  # 所以保持非阻塞（continue-on-error），只在手动触发且选择 roothide=true 时运行。
+  # RootHide 构建：用 roothide 的 Theos 分支编 arm64e，产物是 iphoneos-arm64e。
+  # 每次 push 都会真的编译（不再门控在手动触发上）；它挂掉时不阻塞 rootless 产物，
+  # 但 job 状态会如实显示为失败，不要忽略。
   # ---------------------------------------------------------------------------
   roothide:
     name: iAgent (RootHide · arm64e)
     needs: checks
     runs-on: macos-15
     timeout-minutes: 45
-    continue-on-error: true
-    if: github.event_name == 'workflow_dispatch' && inputs.roothide == 'true'
     steps:
       - uses: actions/checkout@v4
 

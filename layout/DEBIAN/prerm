@@ -1,11 +1,19 @@
 #!/bin/sh
-# iAgent prerm — stop the daemon before its binary disappears.
-# User data in /var/mobile/Library/iAgent is deliberately preserved.
-set -u
+# iAgent prerm — 删除二进制前先停掉守护进程。
+# 用户数据 /var/mobile/Library/iAgent 刻意保留。
+#
+# 和 postinst 一样：绝不在 dpkg 事务里 respring（会把 Sileo 和 dpkg 一起杀掉，
+# 留下 "dpkg 已中断"），也绝不非零退出。
 
 PKG="com.dsh.iagent"
+DATA_DIR="/var/mobile/Library/iAgent"
+LOG_DIR="$DATA_DIR/logs"
 
-log() { echo "[iAgent] $*"; }
+log() {
+	echo "[iAgent] $*"
+	mkdir -p "$LOG_DIR" 2>/dev/null
+	echo "$(date '+%Y-%m-%d %H:%M:%S') [prerm] $*" >>"$LOG_DIR/postinst.log" 2>/dev/null
+}
 
 SELF="$0"
 case "$SELF" in
@@ -28,22 +36,12 @@ else
 	LAUNCHCTL="launchctl"
 fi
 
-"$LAUNCHCTL" bootout system "$PLIST" >/dev/null 2>&1 \
-	|| "$LAUNCHCTL" unload -w "$PLIST" >/dev/null 2>&1 \
-	|| true
+"$LAUNCHCTL" bootout system "$PLIST" >/dev/null 2>&1 ||
+	"$LAUNCHCTL" unload -w "$PLIST" >/dev/null 2>&1
 
-rm -f "$JBROOT/basebin/LaunchDaemons/$PKG.daemon.plist" 2>/dev/null || true
-killall iagentd >/dev/null 2>&1 || true
+rm -f "$JBROOT/basebin/LaunchDaemons/$PKG.daemon.plist" 2>/dev/null
+killall iagentd >/dev/null 2>&1
 
-log "iAgent 已卸载；用户数据保留在 /var/mobile/Library/iAgent 。"
-
-# SpringBoard still has the dylib mapped, so refresh it.
-if command -v sbreload >/dev/null 2>&1; then
-	sbreload >/dev/null 2>&1 || true
-elif [ -x "$JBROOT/usr/bin/sbreload" ]; then
-	"$JBROOT/usr/bin/sbreload" >/dev/null 2>&1 || true
-else
-	killall -9 SpringBoard >/dev/null 2>&1 || true
-fi
-
+log "已停止守护进程并清理 LaunchDaemon；用户数据保留在 $DATA_DIR"
+log "SpringBoard 里仍映射着旧的 dylib，想彻底清掉需要重启一次 SpringBoard（本脚本不会替你重启）。"
 exit 0

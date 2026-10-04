@@ -1,16 +1,27 @@
 #!/bin/sh
 # iAgent postinst — works on Dopamine (rootless) and RootHide.
 #
-# Nothing here may assume /var/jb: RootHide installs into a randomised jbroot
-# (/{var/containers/Bundle/Application}/.jbroot-<hex>) and loads system daemons
-# from <jbroot>/basebin/LaunchDaemons. The prefix is derived from $0 instead.
-set -u
+# 三条硬规则（都是踩过的坑）：
+#   1. 绝不在这里 respring / killall SpringBoard。Sileo 是 SpringBoard 里的 App，
+#      dpkg 是 Sileo 的子进程，重启 SpringBoard 会把 dpkg 一起杀掉，留下
+#      "dpkg 已中断" 的半配置状态。改为写一个标记文件，让用户自己（或 Sileo 的提示）
+#      respring。
+#   2. 绝不非零退出。这里任何失败都只是"功能没生效"，不能让 dpkg 事务失败。
+#   3. 不假设 /var/jb：RootHide 的 jbroot 是随机的，前缀从 $0 推导。
+#
+# 诊断信息写到 /var/mobile/Library/iAgent/logs/postinst.log（Sileo 不显示脚本输出）。
 
 PKG="com.dsh.iagent"
+DATA_DIR="/var/mobile/Library/iAgent"
+LOG_DIR="$DATA_DIR/logs"
 
-log() { echo "[iAgent] $*"; }
+log() {
+	echo "[iAgent] $*"
+	mkdir -p "$LOG_DIR" 2>/dev/null
+	echo "$(date '+%Y-%m-%d %H:%M:%S') [postinst] $*" >>"$LOG_DIR/postinst.log" 2>/dev/null
+}
 
-# --- 1. work out the jailbreak root ---------------------------------------
+# --- 1. jailbreak root ----------------------------------------------------
 SELF="$0"
 case "$SELF" in
 	*/*) ;;
@@ -24,62 +35,59 @@ if [ "$JBROOT" = "$SELF" ] || [ -z "$JBROOT" ]; then
 		JBROOT=""
 	fi
 fi
-log "jailbreak root: ${JBROOT:-/}"
 
 BIN="$JBROOT/usr/bin/iagentd"
 PLIST="$JBROOT/Library/LaunchDaemons/$PKG.daemon.plist"
-DATA_DIR="/var/mobile/Library/iAgent"
 
+log "开始安装：jailbreak root=${JBROOT:-/}  包架构=$(dpkg --print-architecture 2>/dev/null || echo '?')"
+
+# --- 2. user data on the rootfs (daemon 是 root，插件是 mobile) -------------
+mkdir -p "$LOG_DIR" "$DATA_DIR/sessions" "$DATA_DIR/approvals" 2>/dev/null
+chown -R mobile:mobile "$DATA_DIR" 2>/dev/null
+chmod 755 "$DATA_DIR" "$LOG_DIR" "$DATA_DIR/sessions" "$DATA_DIR/approvals" 2>/dev/null
+
+# --- 3. LaunchDaemon plist 指向这个越狱 ------------------------------------
+if [ -f "$PLIST" ]; then
+	if [ -n "$JBROOT" ] && [ "$JBROOT" != "/var/jb" ] && grep -q '/var/jb' "$PLIST" 2>/dev/null; then
+		sed -i '' "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null ||
+			sed -i "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null
+		log "已把 plist 里的 /var/jb 改写为 $JBROOT"
+	fi
+	chmod 644 "$PLIST" 2>/dev/null
+	chown root:wheel "$PLIST" 2>/dev/null
+else
+	log "警告：找不到 $PLIST"
+fi
+
+# RootHide 从 <jbroot>/basebin/LaunchDaemons 加载系统守护进程
+if [ -n "$JBROOT" ] && [ -d "$JBROOT/basebin" ] && [ -f "$PLIST" ]; then
+	mkdir -p "$JBROOT/basebin/LaunchDaemons" 2>/dev/null
+	cp -f "$PLIST" "$JBROOT/basebin/LaunchDaemons/" 2>/dev/null
+	log "已复制 LaunchDaemon 到 $JBROOT/basebin/LaunchDaemons"
+fi
+
+[ -f "$BIN" ] && chmod 755 "$BIN" 2>/dev/null
+log "守护进程二进制：$BIN $([ -x "$BIN" ] && echo '(可执行)' || echo '(缺失或不可执行)')"
+
+# --- 4. 启动守护进程（失败不影响安装：开机时还会自己起来） -------------------
 if [ -x "$JBROOT/usr/bin/launchctl" ]; then
 	LAUNCHCTL="$JBROOT/usr/bin/launchctl"
 else
 	LAUNCHCTL="launchctl"
 fi
-
-# --- 2. user data on the rootfs (shared by the root daemon and the tweak) ---
-mkdir -p "$DATA_DIR/logs" "$DATA_DIR/sessions" "$DATA_DIR/approvals" 2>/dev/null || true
-chown -R mobile:mobile "$DATA_DIR" 2>/dev/null || true
-chmod 755 "$DATA_DIR" 2>/dev/null || true
-chmod 755 "$DATA_DIR/logs" "$DATA_DIR/sessions" "$DATA_DIR/approvals" 2>/dev/null || true
-
-# --- 3. point the LaunchDaemon at this jailbreak --------------------------
 if [ -f "$PLIST" ]; then
-	if [ -n "$JBROOT" ] && [ "$JBROOT" != "/var/jb" ]; then
-		# The payload ships the rootless path (/var/jb/...); rewrite it.
-		sed -i '' "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null \
-			|| sed -i "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null \
-			|| true
-	fi
-	chmod 644 "$PLIST" 2>/dev/null || true
-	chown root:wheel "$PLIST" 2>/dev/null || true
+	"$LAUNCHCTL" bootout system "$PLIST" >/dev/null 2>&1
+	"$LAUNCHCTL" bootstrap system "$PLIST" >/dev/null 2>&1 ||
+		"$LAUNCHCTL" load -w "$PLIST" >/dev/null 2>&1
+	log "launchctl 已尝试加载守护进程（失败也没关系，重启设备后会随系统加载）"
 fi
 
-if [ -n "$JBROOT" ] && [ -d "$JBROOT/basebin" ] && [ -f "$PLIST" ]; then
-	mkdir -p "$JBROOT/basebin/LaunchDaemons" 2>/dev/null || true
-	cp -f "$PLIST" "$JBROOT/basebin/LaunchDaemons/" 2>/dev/null || true
-	log "已复制 LaunchDaemon 到 basebin/LaunchDaemons（RootHide）"
-fi
+# --- 5. 不 respring：只留标记，让用户/包管理器决定 --------------------------
+# 手动 respring 的方法：Sileo 装完后提示的“重新启动 SpringBoard”，
+# 或命令行 sbreload / killall -9 SpringBoard。守护进程不需要 respring 就能用：
+# 直接访问 http://127.0.0.1:8080 即可验证。
+touch "$DATA_DIR/.needs-respring" 2>/dev/null
 
-[ -f "$BIN" ] && chmod 755 "$BIN" 2>/dev/null || true
-
-# --- 4. (re)start the daemon ---------------------------------------------
-# Never fail the install over launchctl: the daemon also starts at boot, and
-# the tweak degrades gracefully while it is offline.
-"$LAUNCHCTL" bootout system "$PLIST" >/dev/null 2>&1 || true
-if [ -f "$PLIST" ]; then
-	"$LAUNCHCTL" bootstrap system "$PLIST" >/dev/null 2>&1 \
-		|| "$LAUNCHCTL" load -w "$PLIST" >/dev/null 2>&1 \
-		|| true
-fi
-
-# --- 5. reload SpringBoard so the tweak is injected ----------------------
-if command -v sbreload >/dev/null 2>&1; then
-	sbreload >/dev/null 2>&1 || true
-elif [ -x "$JBROOT/usr/bin/sbreload" ]; then
-	"$JBROOT/usr/bin/sbreload" >/dev/null 2>&1 || true
-else
-	killall -9 SpringBoard >/dev/null 2>&1 || true
-fi
-
-log "安装完成。SpringBoard 恢复后点击悬浮球，或直接访问 http://127.0.0.1:8080 。"
+log "安装完成。守护进程无需 respring 即可访问 http://127.0.0.1:8080 ；"
+log "悬浮球需要重启一次 SpringBoard 后出现（Sileo 会提示，或手动 sbreload）。"
 exit 0
