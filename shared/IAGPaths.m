@@ -7,7 +7,7 @@
 #import "IAGVersion.h"
 
 #import <sys/stat.h>
-#import <sys/statfs.h>
+#import <sys/mount.h>    // struct statfs / statfs() 在 Darwin 上由 sys/mount.h 提供
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import <dlfcn.h>

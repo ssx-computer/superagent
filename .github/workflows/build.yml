@@ -120,11 +120,11 @@ jobs:
           echo "sysroot: $SDK"
           fail=0
           for f in daemon/*.m shared/*.m tweak/*.m; do
-            out=$(clang -fsyntax-only -fobjc-arc -Wno-everything \
+            out=$(clang -fsyntax-only -fobjc-arc \
                     -I"$PWD/shared" -I"$PWD/daemon" -I"$PWD/tweak" \
                     -isysroot "$SDK" -target arm64-apple-ios15.0 \
                     -fmodules-cache-path=/tmp/iag-modules \
-                    "$f" 2>&1)
+                    "$f" 2>&1 | grep -E ' (error|fatal error):' || true)
             if [ -n "$out" ]; then
               echo "===== $f"
               echo "$out" | head -n 40
