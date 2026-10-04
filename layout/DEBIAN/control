@@ -1,0 +1,15 @@
+Package: com.dsh.iagent
+Name: iAgent
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 原生 iOS AI Agent：终端、文件、App、UI 自动化与定时任务
+Depends: firmware (>= 15.0)
+Section: Tweaks
+Priority: optional
+Maintainer: DSH
+Author: DSH
+Homepage: https://github.com/dsh/iagent
+Depiction: https://github.com/dsh/iagent
+Icon: https://raw.githubusercontent.com/dsh/iagent/main/docs/icon.png
+Tag: purpose::extension, role::enduser
+Installed-Size: 1024

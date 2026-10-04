@@ -1,0 +1,124 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      roothide:
+        description: '同时构建 RootHide (roothide/theos) 版本'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Dopamine / rootless build. This is the primary artifact: rootless v2 rpaths
+  # let the very same binaries resolve on RootHide too.
+  # ---------------------------------------------------------------------------
+  rootless:
+    name: iAgent (rootless · Dopamine)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Theos 与 iOS SDK
+        run: |
+          set -e
+          export THEOS="$HOME/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz -o /tmp/sdks.tar.gz
+          tar -xzf /tmp/sdks.tar.gz -C /tmp
+          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
+          ls "$THEOS/sdks"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: 显示工具链版本
+        run: |
+          xcodebuild -version
+          "$THEOS/bin/ldid" -v 2>&1 | head -n 2 || true
+
+      - name: 构建 .deb
+        run: |
+          set -e
+          chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm
+          make clean package FINALPACKAGE=1
+          ls -l packages/
+
+      - name: 检查包内容
+        run: |
+          set -e
+          DEB=$(ls packages/*.deb | head -n 1)
+          echo "package: $DEB"
+          dpkg-deb -I "$DEB"
+          dpkg-deb -c "$DEB" | head -n 40
+          # The daemon binary and the tweak must be present and executable.
+          dpkg-deb -c "$DEB" | grep -q 'usr/bin/iagentd' || { echo "iagentd missing"; exit 1; }
+          dpkg-deb -c "$DEB" | grep -q 'DynamicLibraries/iagent.dylib' || { echo "tweak missing"; exit 1; }
+          dpkg-deb -c "$DEB" | grep -q 'usr/share/iagent/web/index.html' || { echo "web ui missing"; exit 1; }
+          # Maintainer scripts must be executable.
+          dpkg-deb -c "$DEB" | grep -E 'postinst' | grep -q '^-rwx' || { echo "postinst not executable"; exit 1; }
+
+      - name: 上传 .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: iagent-rootless-deb
+          path: packages/*.deb
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.deb
+          generate_release_notes: true
+          body: |
+            iAgent 原生 iOS AI Agent。
+
+            安装：下载 `.deb` 后用 Sileo / Zebra 打开，或 `dpkg -i`。
+            支持 iOS 15 及以上，Dopamine（rootless）与 RootHide 均可安装。
+
+  # ---------------------------------------------------------------------------
+  # RootHide build. Needs the roothide fork of Theos and arm64e; kept
+  # non-blocking because that fork moves independently of upstream Theos.
+  # ---------------------------------------------------------------------------
+  roothide:
+    name: iAgent (RootHide · arm64e)
+    runs-on: macos-15
+    continue-on-error: true
+    if: github.event_name == 'workflow_dispatch' && inputs.roothide == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 roothide/theos 与 iOS SDK
+        run: |
+          set -e
+          export THEOS="$HOME/theos-roothide"
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz -o /tmp/sdks.tar.gz
+          tar -xzf /tmp/sdks.tar.gz -C /tmp
+          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: 构建 .deb
+        run: |
+          set -e
+          chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm
+          make clean package FINALPACKAGE=1 IAG_ROOTHIDE=1 ARCHS=arm64e
+          ls -l packages/
+          dpkg-deb -I packages/*.deb
+
+      - name: 上传 .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: iagent-roothide-deb
+          path: packages/*.deb
+          if-no-files-found: warn

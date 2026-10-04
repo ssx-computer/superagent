@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Entitlements for the root daemon (iagentd).
+
+    This is the minimal set that rootless jailbreaks (Dopamine) and RootHide
+    both accept for a launchd-started daemon that needs to:
+      * run unsandboxed (it spawns shells and reads /var/mobile),
+      * touch app bundle/data containers when the agent works on files.
+
+    RootHide's own documentation lists exactly these four keys as the baseline
+    for jailbreak binaries; see docs/research/roothide-dopamine-theos.md §2.4.
+    The SpringBoard tweak deliberately carries no entitlements of its own: it
+    relies on SpringBoard's process entitlements (that is the whole reason UI
+    automation runs inside SpringBoard rather than in the daemon).
+-->
+<plist version="1.0">
+<dict>
+    <key>platform-application</key>
+    <true/>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppBundles</key>
+    <true/>
+    <key>com.apple.private.security.storage.AppDataContainers</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,85 @@
+#!/bin/sh
+# iAgent postinst — works on Dopamine (rootless) and RootHide.
+#
+# Nothing here may assume /var/jb: RootHide installs into a randomised jbroot
+# (/{var/containers/Bundle/Application}/.jbroot-<hex>) and loads system daemons
+# from <jbroot>/basebin/LaunchDaemons. The prefix is derived from $0 instead.
+set -u
+
+PKG="com.dsh.iagent"
+
+log() { echo "[iAgent] $*"; }
+
+# --- 1. work out the jailbreak root ---------------------------------------
+SELF="$0"
+case "$SELF" in
+	*/*) ;;
+	*) if command -v "$SELF" >/dev/null 2>&1; then SELF="$(command -v "$SELF")"; fi ;;
+esac
+JBROOT="${SELF%%/var/lib/dpkg/info/*}"
+if [ "$JBROOT" = "$SELF" ] || [ -z "$JBROOT" ]; then
+	if [ -d /var/jb ]; then
+		JBROOT="/var/jb"
+	else
+		JBROOT=""
+	fi
+fi
+log "jailbreak root: ${JBROOT:-/}"
+
+BIN="$JBROOT/usr/bin/iagentd"
+PLIST="$JBROOT/Library/LaunchDaemons/$PKG.daemon.plist"
+DATA_DIR="/var/mobile/Library/iAgent"
+
+if [ -x "$JBROOT/usr/bin/launchctl" ]; then
+	LAUNCHCTL="$JBROOT/usr/bin/launchctl"
+else
+	LAUNCHCTL="launchctl"
+fi
+
+# --- 2. user data on the rootfs (shared by the root daemon and the tweak) ---
+mkdir -p "$DATA_DIR/logs" "$DATA_DIR/sessions" "$DATA_DIR/approvals" 2>/dev/null || true
+chown -R mobile:mobile "$DATA_DIR" 2>/dev/null || true
+chmod 755 "$DATA_DIR" 2>/dev/null || true
+chmod 755 "$DATA_DIR/logs" "$DATA_DIR/sessions" "$DATA_DIR/approvals" 2>/dev/null || true
+
+# --- 3. point the LaunchDaemon at this jailbreak --------------------------
+if [ -f "$PLIST" ]; then
+	if [ -n "$JBROOT" ] && [ "$JBROOT" != "/var/jb" ]; then
+		# The payload ships the rootless path (/var/jb/...); rewrite it.
+		sed -i '' "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null \
+			|| sed -i "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null \
+			|| true
+	fi
+	chmod 644 "$PLIST" 2>/dev/null || true
+	chown root:wheel "$PLIST" 2>/dev/null || true
+fi
+
+if [ -n "$JBROOT" ] && [ -d "$JBROOT/basebin" ] && [ -f "$PLIST" ]; then
+	mkdir -p "$JBROOT/basebin/LaunchDaemons" 2>/dev/null || true
+	cp -f "$PLIST" "$JBROOT/basebin/LaunchDaemons/" 2>/dev/null || true
+	log "已复制 LaunchDaemon 到 basebin/LaunchDaemons（RootHide）"
+fi
+
+[ -f "$BIN" ] && chmod 755 "$BIN" 2>/dev/null || true
+
+# --- 4. (re)start the daemon ---------------------------------------------
+# Never fail the install over launchctl: the daemon also starts at boot, and
+# the tweak degrades gracefully while it is offline.
+"$LAUNCHCTL" bootout system "$PLIST" >/dev/null 2>&1 || true
+if [ -f "$PLIST" ]; then
+	"$LAUNCHCTL" bootstrap system "$PLIST" >/dev/null 2>&1 \
+		|| "$LAUNCHCTL" load -w "$PLIST" >/dev/null 2>&1 \
+		|| true
+fi
+
+# --- 5. reload SpringBoard so the tweak is injected ----------------------
+if command -v sbreload >/dev/null 2>&1; then
+	sbreload >/dev/null 2>&1 || true
+elif [ -x "$JBROOT/usr/bin/sbreload" ]; then
+	"$JBROOT/usr/bin/sbreload" >/dev/null 2>&1 || true
+else
+	killall -9 SpringBoard >/dev/null 2>&1 || true
+fi
+
+log "安装完成。SpringBoard 恢复后点击悬浮球，或直接访问 http://127.0.0.1:8080 。"
+exit 0

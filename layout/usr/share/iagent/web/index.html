@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#0a0a0d">
+<title>iAgent</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ============ 顶栏 ============ -->
+  <header id="appbar">
+    <div class="appbar-left">
+      <span class="brand">iAgent</span>
+      <span class="brand-sub" id="appbar-ver"></span>
+    </div>
+    <div class="appbar-right">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span class="conn-label" id="conn-label">检测中…</span>
+    </div>
+  </header>
+
+  <!-- ============ 页面容器 ============ -->
+  <main id="pages">
+
+    <!-- ---------- 聊天 ---------- -->
+    <section class="page page-fixed" id="page-chat" data-page="chat">
+      <div class="banner hidden" id="chat-banner"></div>
+
+      <div class="chat-head">
+        <div class="chat-head-main">
+          <div class="chat-title" id="chat-title">未选择会话</div>
+          <div class="chat-sub" id="chat-sub">先发送一条消息即可开始</div>
+        </div>
+        <div class="chat-head-actions">
+          <button type="button" class="btn btn-sm btn-danger hidden" id="chat-stop">停止</button>
+          <button type="button" class="btn btn-sm" id="chat-new">新建会话</button>
+        </div>
+      </div>
+
+      <div class="chat-scroll" id="chat-scroll">
+        <div class="chat-list" id="chat-list"></div>
+      </div>
+
+      <div class="chat-inputbar">
+        <textarea id="chat-input" rows="1" placeholder="输入消息…" enterkeyhint="send"
+                  autocapitalize="sentences" autocorrect="on" spellcheck="false"></textarea>
+        <button type="button" class="btn btn-primary btn-send" id="chat-send">发送</button>
+      </div>
+    </section>
+
+    <!-- ---------- 终端 ---------- -->
+    <section class="page page-fixed" id="page-term" data-page="term">
+      <div class="term-toolbar">
+        <button type="button" class="btn btn-sm" id="term-new">+ 新建终端</button>
+        <select class="mini-select" id="term-shell" aria-label="shell">
+          <option value="">默认 shell</option>
+          <option value="/bin/sh">/bin/sh</option>
+          <option value="/bin/bash">/bin/bash</option>
+          <option value="/bin/zsh">/bin/zsh</option>
+          <option value="/var/jb/bin/sh">/var/jb/bin/sh</option>
+          <option value="/var/jb/bin/bash">/var/jb/bin/bash</option>
+        </select>
+        <span class="grow"></span>
+        <button type="button" class="btn btn-sm btn-danger" id="term-close">关闭</button>
+      </div>
+
+      <div class="term-quickbar">
+        <input class="mini-input" id="term-quick" type="text" placeholder="快速命令（/api/exec，非 PTY）"
+               autocapitalize="off" autocorrect="off" spellcheck="false">
+        <button type="button" class="btn btn-sm" id="term-quick-run">执行</button>
+      </div>
+      <pre class="term-quick-out hidden" id="term-quick-out"></pre>
+
+      <div class="term-sessions hidden" id="term-sessions"></div>
+
+      <div class="term-scroll" id="term-scroll">
+        <pre class="term-out" id="term-out"></pre>
+      </div>
+
+      <div class="term-keybar" id="term-keybar">
+        <button type="button" class="key" data-key="ctrl-c">Ctrl-C</button>
+        <button type="button" class="key" data-key="ctrl-d">Ctrl-D</button>
+        <button type="button" class="key" data-key="tab">Tab</button>
+        <button type="button" class="key" data-key="up">↑</button>
+        <button type="button" class="key" data-key="down">↓</button>
+        <button type="button" class="key" data-key="esc">Esc</button>
+        <button type="button" class="key" data-key="clear">清屏</button>
+      </div>
+
+      <!-- 隐藏输入框：捕获软键盘输入 -->
+      <textarea id="term-hidden" class="term-hidden" rows="1" autocapitalize="off" autocorrect="off"
+                autocomplete="off" spellcheck="false" aria-label="终端输入"></textarea>
+    </section>
+
+    <!-- ---------- 工具 ---------- -->
+    <section class="page page-scroll" id="page-tools" data-page="tools">
+      <div class="page-pad">
+        <div class="page-head">
+          <h1 class="page-title">工具</h1>
+          <button type="button" class="btn btn-sm" id="tools-refresh">刷新</button>
+        </div>
+
+        <div class="tools-wrap">
+          <div class="tools-listbox">
+            <div class="tools-list" id="tools-list"></div>
+          </div>
+          <div class="tools-detail" id="tools-detail">
+            <div class="empty">选择一个工具以填写参数</div>
+          </div>
+        </div>
+
+        <!-- 定时任务 -->
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">定时任务</div>
+            <button type="button" class="btn btn-sm" id="cron-refresh">刷新</button>
+          </div>
+          <div class="field">
+            <span class="label">调度表达式（cron）</span>
+            <input id="cron-schedule" class="input mono" type="text" placeholder="*/5 * * * *"
+                   autocapitalize="off" autocorrect="off" spellcheck="false">
+          </div>
+          <div class="field">
+            <span class="label">命令</span>
+            <textarea id="cron-command" class="mono" rows="2" placeholder="echo hello"
+                      autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+          </div>
+          <div class="field-row-between">
+            <label class="switch-row">
+              <span>创建后立即启用</span>
+              <input type="checkbox" class="switch" id="cron-enabled" checked>
+              <i class="switch-ui"></i>
+            </label>
+            <button type="button" class="btn btn-sm btn-primary" id="cron-add">添加任务</button>
+          </div>
+          <div class="cron-list" id="cron-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 会话 ---------- -->
+    <section class="page page-scroll" id="page-sessions" data-page="sessions">
+      <div class="page-pad">
+        <div class="page-head">
+          <h1 class="page-title">会话</h1>
+          <button type="button" class="btn btn-sm" id="sessions-refresh">刷新</button>
+        </div>
+        <button type="button" class="btn btn-primary btn-block" id="sessions-new">+ 新建会话</button>
+        <div class="card">
+          <div class="sessions-list" id="sessions-list">
+            <div class="empty">加载中…</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- 设置 ---------- -->
+    <section class="page page-scroll" id="page-settings" data-page="settings">
+      <div class="page-pad">
+        <div class="page-head">
+          <h1 class="page-title">设置</h1>
+          <button type="button" class="btn btn-sm" id="set-reload">重新加载</button>
+        </div>
+
+        <div class="card" id="set-loading">
+          <div class="empty">加载中…</div>
+        </div>
+
+        <div class="card hidden" id="set-model-card">
+          <div class="card-title">模型</div>
+          <label class="field">
+            <span class="label">Base URL</span>
+            <input id="set-baseUrl" class="input mono" type="text" inputmode="url" placeholder="https://api.openai.com/v1"
+                   autocapitalize="off" autocorrect="off" spellcheck="false">
+          </label>
+          <label class="field">
+            <span class="label">API Key</span>
+            <input id="set-apiKey" class="input mono" type="password" placeholder="未设置（留空表示不修改）"
+                   autocapitalize="off" autocorrect="off" spellcheck="false">
+            <span class="hint" id="set-apiKey-hint"></span>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span class="label">模型名</span>
+              <input id="set-model" class="input mono" type="text" placeholder="gpt-4o-mini"
+                     autocapitalize="off" autocorrect="off" spellcheck="false">
+            </label>
+            <label class="field field-narrow">
+              <span class="label">最大 Token</span>
+              <input id="set-maxTokens" class="input mono" type="number" inputmode="numeric" min="1" step="1" placeholder="4096">
+            </label>
+          </div>
+          <label class="field">
+            <span class="label">温度 <b class="mono" id="set-temperature-val">1.0</b></span>
+            <input id="set-temperature" class="range" type="range" min="0" max="2" step="0.1" value="1">
+          </label>
+          <label class="field">
+            <span class="label">系统提示词</span>
+            <textarea id="set-systemPrompt" class="mono" rows="4" placeholder="你是一个 iOS 上的 AI Agent…"></textarea>
+          </label>
+          <button type="button" class="btn btn-sm btn-danger-ghost" id="set-apiKey-clear">清除已保存的 API Key</button>
+        </div>
+
+        <div class="card hidden" id="set-run-card">
+          <div class="card-title">运行</div>
+          <div class="field-row">
+            <label class="field field-narrow">
+              <span class="label">端口</span>
+              <input id="set-port" class="input mono" type="number" inputmode="numeric" min="1" max="65535" step="1">
+            </label>
+            <label class="field field-narrow">
+              <span class="label">Shell 超时（秒）</span>
+              <input id="set-shellTimeout" class="input mono" type="number" inputmode="numeric" min="1" step="1">
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="field">
+              <span class="label">工作目录</span>
+              <input id="set-workDir" class="input mono" type="text" placeholder="/var/mobile"
+                     autocapitalize="off" autocorrect="off" spellcheck="false">
+            </label>
+            <label class="field field-narrow">
+              <span class="label">最大步数</span>
+              <input id="set-maxSteps" class="input mono" type="number" inputmode="numeric" min="1" step="1">
+            </label>
+          </div>
+        </div>
+
+        <div class="card hidden" id="set-tools-card">
+          <div class="card-title">工具开关</div>
+          <label class="switch-row">
+            <span>Shell 命令 <em class="muted">shell_exec</em></span>
+            <input type="checkbox" class="switch" id="set-tool-shell">
+            <i class="switch-ui"></i>
+          </label>
+          <label class="switch-row">
+            <span>文件读写 <em class="muted">file_*</em></span>
+            <input type="checkbox" class="switch" id="set-tool-file">
+            <i class="switch-ui"></i>
+          </label>
+          <label class="switch-row">
+            <span>App 控制 <em class="muted">app_*</em></span>
+            <input type="checkbox" class="switch" id="set-tool-app">
+            <i class="switch-ui"></i>
+          </label>
+          <label class="switch-row">
+            <span>通知 <em class="muted">notify</em></span>
+            <input type="checkbox" class="switch" id="set-tool-notify">
+            <i class="switch-ui"></i>
+          </label>
+          <label class="switch-row">
+            <span>定时任务 <em class="muted">cron</em></span>
+            <input type="checkbox" class="switch" id="set-tool-cron">
+            <i class="switch-ui"></i>
+          </label>
+          <label class="switch-row">
+            <span>UI 自动化 <em class="muted">ui</em></span>
+            <input type="checkbox" class="switch" id="set-tool-ui">
+            <i class="switch-ui"></i>
+          </label>
+          <label class="switch-row">
+            <span>HTTP 请求 <em class="muted">http</em></span>
+            <input type="checkbox" class="switch" id="set-tool-http">
+            <i class="switch-ui"></i>
+          </label>
+          <label class="switch-row">
+            <span>记录请求日志 <em class="muted">requestLogging</em></span>
+            <input type="checkbox" class="switch" id="set-requestLogging">
+            <i class="switch-ui"></i>
+          </label>
+        </div>
+
+        <div class="card hidden" id="set-security-card">
+          <div class="card-title">安全</div>
+          <div class="field">
+            <span class="label">审批模式</span>
+            <label class="radio-row">
+              <input type="radio" name="set-approval" value="auto">
+              <span>自动执行 <em class="muted">不询问</em></span>
+            </label>
+            <label class="radio-row">
+              <input type="radio" name="set-approval" value="dangerous">
+              <span>危险命令确认 <em class="muted">推荐</em></span>
+            </label>
+            <label class="radio-row">
+              <input type="radio" name="set-approval" value="always">
+              <span>全部确认 <em class="muted">每次工具调用都确认</em></span>
+            </label>
+          </div>
+          <label class="field">
+            <span class="label">访问 token</span>
+            <input id="set-authToken" class="input mono" type="text" placeholder="留空表示不修改"
+                   autocapitalize="off" autocorrect="off" spellcheck="false">
+            <span class="hint">填写后所有 <code>/api</code> 请求都会带上 <code>X-IAG-Token</code>。留空=不修改；填 <code>__CLEAR__</code> 才会清除（需 daemon 端支持）。</span>
+          </label>
+        </div>
+
+        <div class="card hidden" id="set-diag-card">
+          <div class="card-title">诊断</div>
+          <div class="diag-grid" id="diag-grid"></div>
+          <div class="btn-row">
+            <button type="button" class="btn btn-sm" id="diag-refresh">刷新状态</button>
+            <button type="button" class="btn btn-sm" id="diag-logs">查看日志</button>
+          </div>
+        </div>
+
+        <div class="settings-savebar hidden" id="set-savebar">
+          <button type="button" class="btn btn-primary btn-block" id="set-save">保存设置</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ============ 底部标签栏 ============ -->
+  <nav id="tabbar">
+    <button type="button" class="tab active" data-tab="chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 5.5A2 2 0 0 1 6.5 3.5h11a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H10l-4.5 4v-4h-1a2 2 0 0 1-2-2z"/></svg>
+      <span>聊天</span>
+    </button>
+    <button type="button" class="tab" data-tab="term">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7.5 9.5l2.6 2.5-2.6 2.5M13 15h4"/></svg>
+      <span>终端</span>
+    </button>
+    <button type="button" class="tab" data-tab="tools">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 4.6a4.6 4.6 0 0 1-6 6L6 19.1 4.9 18l8.5-8.5a4.6 4.6 0 0 1 6-6L16.6 6.3l1.1 1.1z"/><path d="M4.9 18l1.1 1.1"/></svg>
+      <span>工具</span>
+    </button>
+    <button type="button" class="tab" data-tab="sessions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 6.5h12M8.5 12h12M8.5 17.5h12"/><circle cx="4.2" cy="6.5" r="1.1"/><circle cx="4.2" cy="12" r="1.1"/><circle cx="4.2" cy="17.5" r="1.1"/></svg>
+      <span>会话</span>
+    </button>
+    <button type="button" class="tab" data-tab="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M12 3v2.6M12 18.4V21M4.2 7.5l2.2 1.3M17.6 15.2l2.2 1.3M4.2 16.5l2.2-1.3M17.6 8.8l2.2-1.3"/></svg>
+      <span>设置</span>
+    </button>
+  </nav>
+
+</div>
+
+<!-- ============ 日志面板 ============ -->
+<div class="modal hidden" id="logs-modal">
+  <div class="modal-backdrop" data-close="1"></div>
+  <div class="modal-panel modal-panel-tall">
+    <div class="modal-head">
+      <span class="modal-title">daemon 日志</span>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-sm" id="logs-refresh">刷新</button>
+        <button type="button" class="btn btn-sm" data-close="1">关闭</button>
+      </div>
+    </div>
+    <pre class="logs-content" id="logs-content">加载中…</pre>
+  </div>
+</div>
+
+<div class="toast-host" id="toast-host"></div>
+<div id="modal-host"></div>
+
+<noscript>
+  <div class="noscript">iAgent 面板需要启用 JavaScript。</div>
+</noscript>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+#!/bin/sh
+# iAgent prerm — stop the daemon before its binary disappears.
+# User data in /var/mobile/Library/iAgent is deliberately preserved.
+set -u
+
+PKG="com.dsh.iagent"
+
+log() { echo "[iAgent] $*"; }
+
+SELF="$0"
+case "$SELF" in
+	*/*) ;;
+	*) if command -v "$SELF" >/dev/null 2>&1; then SELF="$(command -v "$SELF")"; fi ;;
+esac
+JBROOT="${SELF%%/var/lib/dpkg/info/*}"
+if [ "$JBROOT" = "$SELF" ] || [ -z "$JBROOT" ]; then
+	if [ -d /var/jb ]; then
+		JBROOT="/var/jb"
+	else
+		JBROOT=""
+	fi
+fi
+
+PLIST="$JBROOT/Library/LaunchDaemons/$PKG.daemon.plist"
+if [ -x "$JBROOT/usr/bin/launchctl" ]; then
+	LAUNCHCTL="$JBROOT/usr/bin/launchctl"
+else
+	LAUNCHCTL="launchctl"
+fi
+
+"$LAUNCHCTL" bootout system "$PLIST" >/dev/null 2>&1 \
+	|| "$LAUNCHCTL" unload -w "$PLIST" >/dev/null 2>&1 \
+	|| true
+
+rm -f "$JBROOT/basebin/LaunchDaemons/$PKG.daemon.plist" 2>/dev/null || true
+killall iagentd >/dev/null 2>&1 || true
+
+log "iAgent 已卸载；用户数据保留在 /var/mobile/Library/iAgent 。"
+
+# SpringBoard still has the dylib mapped, so refresh it.
+if command -v sbreload >/dev/null 2>&1; then
+	sbreload >/dev/null 2>&1 || true
+elif [ -x "$JBROOT/usr/bin/sbreload" ]; then
+	"$JBROOT/usr/bin/sbreload" >/dev/null 2>&1 || true
+else
+	killall -9 SpringBoard >/dev/null 2>&1 || true
+fi
+
+exit 0

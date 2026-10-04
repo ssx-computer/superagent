@@ -1,0 +1,10 @@
+# 这个仓库要在 macOS/Linux 上构建（Theos + dpkg），并且 layout/DEBIAN 下的维护
+# 脚本必须是 LF——CRLF 的 postinst 会让 dpkg 直接报错。所以强制所有文本文件用 LF，
+# 不跟随 Windows 上的 core.autocrlf。
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.deb binary
+*.dylib binary

@@ -1,0 +1,28 @@
+# Theos
+.theos/
+packages/
+*.deb
+*.dylib.tmp
+obj/
+
+# 构建产物
+*.o
+*.link
+
+# macOS
+.DS_Store
+._*
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.pyc
+
+# 本地配置（不要提交 API Key）
+config.plist
+*.local.plist

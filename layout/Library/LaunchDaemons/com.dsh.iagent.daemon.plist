@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    LaunchDaemon for iagentd.
+
+    The path below is the rootless/Dopamine one (/var/jb/usr/bin/iagentd).
+    DEBIAN/postinst rewrites every "/var/jb" occurrence to the real jailbreak
+    root when it is different (RootHide uses a randomised jbroot and has no
+    /var/jb at all), so this file is correct on both after installation.
+
+    IMPORTANT: Theos prefixes layout/ with the scheme's install prefix, so the
+    file ends up at <jbroot>/Library/LaunchDaemons/com.dsh.iagent.daemon.plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dsh.iagent.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/jb/usr/bin/iagentd</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- launchd creates these files; the directory is created by postinst. -->
+    <key>StandardOutPath</key>
+    <string>/var/mobile/Library/iAgent/logs/iagentd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/mobile/Library/iAgent/logs/iagentd.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/var/mobile</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/var/jb/usr/bin:/var/jb/bin:/var/jb/sbin:/var/jb/usr/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>TERM</key>
+        <string>xterm-256color</string>
+        <key>LANG</key>
+        <string>zh_CN.UTF-8</string>
+        <key>HOME</key>
+        <string>/var/mobile</string>
+    </dict>
+</dict>
+</plist>

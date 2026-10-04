@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Injection filter for the iAgent tweak.
+
+    The file name must match the dylib name (iagent.dylib -> iagent.plist) —
+    that is how ElleKit / roothide match a filter to its library.
+
+    SpringBoard only: the tweak draws the floating bubble and performs HID/AX
+    automation, both of which only make sense (and are only permitted) there.
+-->
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <dict>
+        <key>Bundles</key>
+        <array>
+            <string>com.apple.springboard</string>
+        </array>
+    </dict>
+</dict>
+</plist>
