@@ -60,15 +60,6 @@ static NSString *IAGDescribeNetworkError(NSError *error)
     return [NSString stringWithFormat:@"%@ %ld %@", domain, (long)error.code, reason];
 }
 
-/// 把远端响应体压成一行预览。
-static NSString *IAGPreviewBody(NSData *data, NSUInteger limit)
-{
-    if (data.length == 0) return @"";
-    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (text.length == 0) text = @"(非 UTF-8 响应)";
-    return IAGCollapseWhitespace(IAGTruncateString(text, limit));
-}
-
 /// 掩码显示 key：既能让用户确认"用的是哪把 key"，又不把完整密钥写进响应/日志。
 static NSString *IAGMaskKey(NSString *key)
 {

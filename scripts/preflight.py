@@ -45,6 +45,11 @@ FAILURES = []
 WARNINGS = []
 CHECKS = 0
 
+# 文件作用域的 static 定义（用于「有没有引用点」的粗筛，见 check_objc）。
+# 只认 IAG / kIAG 前缀，避免把第三方头文件里的写法误判成本项目的问题。
+STATIC_FUNC_RE = re.compile(r'^static\s+[^;{=]*?\b(IAG[A-Za-z0-9_]*)\s*\(', re.M)
+STATIC_VAR_RE = re.compile(r'^static\s+[^;{]*?\b(kIAG[A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*=', re.M)
+
 
 def fail(area, message):
     FAILURES.append((area, message))
@@ -198,7 +203,21 @@ def check_objc(verbose):
             if not re.search(r'^#\s*ifndef\s+\w+', text, re.M):
                 warn("sources", "%s 没有 include guard" % rel)
 
-    ok("sources", "%d 个源文件" % len(files), "检查了 %d 个 .m/.h 的引用与配平" % len(files))
+        # 没有引用点的 static 函数/变量：CI 编译带 -Werror，这类警告会让整轮构建失败
+        # （曾因 daemon/IAGModelCheck.m 里一个没人调用的 static 函数白跑两轮 CI）。
+        # 注释与字符串已经在 stripped 里去掉，所以数字符串里的同名文字不会被算作引用。
+        if path.endswith(".m"):
+            for kind, flag, pattern in (("函数", "function", STATIC_FUNC_RE),
+                                        ("变量", "variable", STATIC_VAR_RE)):
+                for match in pattern.finditer(text):
+                    name = match.group(1)
+                    if name == "main":
+                        continue
+                    if len(re.findall(r'\b%s\b' % re.escape(name), stripped)) <= 1:
+                        fail("sources", "%s 里的 static %s %s 没有任何引用点（-Wunused-%s 会以 -Werror 失败）：删掉它，或补上调用点"
+                             % (rel, kind, name, flag))
+
+    ok("sources", "%d 个源文件" % len(files), "检查了 %d 个 .m/.h 的引用、配平与未使用的 static" % len(files))
 
 
 # ---------------------------------------------------------------------------
