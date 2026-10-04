@@ -97,18 +97,19 @@ jobs:
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
           echo "$THEOS/bin" >> "$GITHUB_PATH"
 
-      - name: 安装 dpkg（Theos 会优先用它打包）
+      - name: 安装打包与签名工具（dpkg / ldid）
         run: |
-          if ! command -v dpkg-deb >/dev/null 2>&1; then
-            brew install dpkg || echo "::warning::dpkg 安装失败，改用 ar/tar 校验包内容"
-          fi
-          command -v dpkg-deb && dpkg-deb --version | head -n 1 || true
+          # Theos 自己不带 ldid，签名时会调用 PATH 里的 `ldid`（否则报 command not found）。
+          command -v ldid >/dev/null 2>&1 || brew install ldid || echo "::warning::ldid 安装失败，签名会失败"
+          command -v dpkg-deb >/dev/null 2>&1 || brew install dpkg || echo "::warning::dpkg 安装失败，改用 ar/tar 校验包内容"
+          echo "ldid: $(command -v ldid || echo 缺失)"
+          echo "dpkg-deb: $(command -v dpkg-deb || echo 缺失)"
 
       - name: 显示工具链版本
         run: |
           uname -m
           xcodebuild -version
-          "$THEOS/bin/ldid" -v 2>&1 | head -n 2 || true
+          ldid -v 2>&1 | head -n 2 || true
 
       # make 会在第一个出错的文件上停下，一轮只能看到一个文件的问题。这里先对每个
       # 源文件单独做语法检查（-fsyntax-only，不产出目标文件），一次列出全部错误。
@@ -247,8 +248,10 @@ jobs:
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
           echo "$THEOS/bin" >> "$GITHUB_PATH"
 
-      - name: 安装 dpkg
-        run: command -v dpkg-deb >/dev/null 2>&1 || brew install dpkg || true
+      - name: 安装打包与签名工具
+        run: |
+          command -v ldid >/dev/null 2>&1 || brew install ldid || true
+          command -v dpkg-deb >/dev/null 2>&1 || brew install dpkg || true
 
       - name: 构建 .deb
         run: |
