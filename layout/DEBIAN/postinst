@@ -47,14 +47,31 @@ chown -R mobile:mobile "$DATA_DIR" 2>/dev/null
 chmod 755 "$DATA_DIR" "$LOG_DIR" "$DATA_DIR/sessions" "$DATA_DIR/approvals" 2>/dev/null
 
 # --- 3. LaunchDaemon plist 指向这个越狱 ------------------------------------
+# 打包时 layout/ 里的 plist 会被 Theos 转成 binary plist，用 sed 改它会把内部偏移表
+# 改坏（launchd 直接读不了）。所以这里用纯 XML 模板重新生成一份覆盖进去。
+TEMPLATE="$JBROOT/usr/share/iagent/iagent.daemon.plist.template"
+mkdir -p "$JBROOT/Library/LaunchDaemons" 2>/dev/null
+if [ -f "$TEMPLATE" ]; then
+	# JBROOT 为空（rootful）时 @JBROOT@ 会被替换成空串，得到 /usr/bin/iagentd
+	sed "s#@JBROOT@#${JBROOT}#g" "$TEMPLATE" >"$PLIST" 2>/dev/null &&
+		log "已用模板生成 XML plist（越狱根目录=${JBROOT:-/}）"
+else
+	log "警告：找不到模板 $TEMPLATE"
+fi
+
 if [ -f "$PLIST" ]; then
-	if [ -n "$JBROOT" ] && [ "$JBROOT" != "/var/jb" ] && grep -q '/var/jb' "$PLIST" 2>/dev/null; then
-		sed -i '' "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null ||
-			sed -i "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null
-		log "已把 plist 里的 /var/jb 改写为 $JBROOT"
-	fi
 	chmod 644 "$PLIST" 2>/dev/null
 	chown root:wheel "$PLIST" 2>/dev/null
+	# 只有在 plist 真是 XML 文本时才做 /var/jb 改写（二进制 plist 改不得）
+	if head -c 5 "$PLIST" 2>/dev/null | grep -q '<?xml' && grep -q '/var/jb' "$PLIST" 2>/dev/null; then
+		if [ -n "$JBROOT" ] && [ "$JBROOT" != "/var/jb" ]; then
+			sed -i '' "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null ||
+				sed -i "s#/var/jb#${JBROOT}#g" "$PLIST" 2>/dev/null
+			log "已把 plist 里的 /var/jb 改写为 $JBROOT"
+		fi
+	fi
+	grep -q "$JBROOT/usr/bin/iagentd" "$PLIST" 2>/dev/null ||
+		log "警告：plist 里没有出现 $JBROOT/usr/bin/iagentd，请检查 $PLIST"
 else
 	log "警告：找不到 $PLIST"
 fi

@@ -10,13 +10,14 @@
 **没有 WebDAV，没有云端中间层，没有服务器中转。** 设备上的守护进程直接在回环地址上提供
 HTTP + SSE 控制面，并由它自己通过 HTTPS 调用 OpenAI 兼容的模型接口；API Key 只存在本机。
 
-> **状态：已在 GitHub Actions 上编译成功并产出 `.deb`；尚未在真机上安装运行。**
+> **状态：已在 GitHub Actions 上编译成功并产出 `.deb`；真机安装正在进行中。**
 > 在 macOS runner（Xcode 16.4 / iPhoneOS 16.5 SDK）上 `iagentd` 与 `iagent.dylib` 都已
-> arm64 + arm64e 编译、链接、签名通过，包内容与元数据断言全部通过，产物从
-> [Actions](https://github.com/ssx-computer/superagent/actions/workflows/build.yml) 的
-> Artifacts 下载即得 `com.dsh.iagent_1.0.0_iphoneos-arm64.deb`（约 208 KB）。
-> **仍未验证的**：装到越狱设备、守护进程真机启动、HID/AX 注入、SpringBoard 内嵌 WebView、
-> RootHide 实机路径 —— 见 [已查证 / 未查证](#已查证--未查证)。
+> arm64 + arm64e 编译、链接、签名通过，包内容与元数据断言全部通过。两个架构的产物都在
+> [Releases](https://github.com/ssx-computer/superagent/releases)（以及 Actions 的 Artifacts）：
+> `..._iphoneos-arm64.deb`（Dopamine / rootless）与 `..._iphoneos-arm64e.deb`（RootHide）。
+> **先确认架构**：`dpkg --print-architecture` 的输出必须和包后缀一致。
+> **仍未验证的**：守护进程真机启动、HID/AX 注入、SpringBoard 内嵌 WebView —— 见
+> [已查证 / 未查证](#已查证--未查证)。
 
 ---
 
@@ -50,14 +51,16 @@ HTTP + SSE 控制面，并由它自己通过 HTTPS 调用 OpenAI 兼容的模型
 ## 3 分钟安装
 
 1. **拿 `.deb`**
-   - 自己编译：见 [docs/build.md](docs/build.md)。
-   - 或用 GitHub Actions 云编译：push 到 `main`/`master`（或手动 `workflow_dispatch`），
-     在 Actions 的 artifact 里下载 `iagent-rootless-deb`；打 `v*` tag 会自动发布到 Release。
+   - [Releases](https://github.com/ssx-computer/superagent/releases) 或 Actions 的 artifact 直接下载
+     （`..._iphoneos-arm64.deb` = Dopamine/rootless，`..._iphoneos-arm64e.deb` = RootHide）；
+   - 或自己编译：见 [docs/build.md](docs/build.md)。
 2. **安装**（已越狱的 iOS 15+ 设备）
-   - Sileo / Zebra 里打开这个 `.deb` → 安装；或
-   - `dpkg -i com.dsh.iagent_1.0.0_iphoneos-arm64.deb`。
-3. 安装脚本会创建数据目录、引导 LaunchDaemon、并在最后自动 respring（`sbreload`，
-   没有则 `killall -9 SpringBoard`）。respring 后悬浮球出现即安装成功。
+   - 先用 `dpkg --print-architecture` 确认架构，装错架构 dpkg 会拒绝并可能留下「dpkg 已中断」；
+   - Sileo / Zebra 里打开对应架构的 `.deb` → 安装；或
+   - `dpkg -i com.dsh.iagent_1.0.1_iphoneos-arm64.deb`。
+3. **不要期待安装完自动 respring**：脚本故意不重启 SpringBoard（在 dpkg 事务里 respring 会把
+   Sileo 和 dpkg 一起杀掉，弄坏 dpkg 状态）。守护进程装完就能用 —— Safari 打开
+   `http://127.0.0.1:8080` 即可；悬浮球要你自己重启一次 SpringBoard 才出现。
 4. 点悬浮球打开控制面板 → **设置** 页填写模型信息 → 保存。
 
 ## 首次运行配置

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    LaunchDaemon 模板（纯 XML 文本）。
+
+    为什么要有这个文件：Theos 打包时会把 layout/ 里的 plist 转成 **binary plist**
+    （bplist00），而二进制 plist 内部有偏移表，用 sed 改字符串会破坏它，launchd 就
+    读不了。所以 postinst 用它重新生成一份纯 XML 的 plist 覆盖进去：
+    @JBROOT@ 会被替换成真实的越狱根目录（Dopamine = /var/jb，RootHide = 随机
+    .jbroot-<hex>，rootful = 空字符串 → 得到 /usr/bin/iagentd）。
+
+    日志与工作目录固定在 rootfs 的 /var/mobile 下（RootHide 的 jbroot 会随越狱更新
+    变化，用户数据不该跟着消失）。
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dsh.iagent.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@JBROOT@/usr/bin/iagentd</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardOutPath</key>
+    <string>/var/mobile/Library/iAgent/logs/iagentd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/mobile/Library/iAgent/logs/iagentd.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/var/mobile</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>@JBROOT@/usr/bin:@JBROOT@/bin:@JBROOT@/sbin:@JBROOT@/usr/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>TERM</key>
+        <string>xterm-256color</string>
+        <key>LANG</key>
+        <string>zh_CN.UTF-8</string>
+        <key>HOME</key>
+        <string>/var/mobile</string>
+    </dict>
+</dict>
+</plist>

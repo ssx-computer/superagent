@@ -16,13 +16,25 @@
 
 ### 方式 A：用 Sileo / Zebra 安装（推荐）
 
-把 `com.dsh.iagent_1.0.0_iphoneos-arm64.deb` 传到设备（AirDrop、`scp`、Filza 均可），点击后用 Sileo 打开并安装。安装结束会自动 respring。
+把 `com.dsh.iagent_1.0.1_iphoneos-arm64.deb`（Dopamine / rootless）或
+`com.dsh.iagent_1.0.1_iphoneos-arm64e.deb`（RootHide / roothide Bootstrap）传到设备（AirDrop、
+`scp`、Filza 均可），点击后用 Sileo 打开并安装。
+
+**先确认架构**：在终端跑 `dpkg --print-architecture`，输出必须与包名后缀一致（`iphoneos-arm64`
+对 `iphoneos-arm64`，`iphoneos-arm64e` 对 `iphoneos-arm64e`）。装错架构 dpkg 会拒绝，Sileo 上强行
+安装还可能留下「dpkg 已中断」的半配置状态。
+
+**安装不会自动 respring**：在 dpkg 事务里重启 SpringBoard 会把 Sileo 和它子进程 dpkg 一起杀掉，
+从而弄坏 dpkg 状态。守护进程装完即可用（Safari 打开 `http://127.0.0.1:8080`），悬浮球需要你自己
+重启一次 SpringBoard（Sileo 装完会提示，或手动 `sbreload`）。
 
 ### 方式 B：命令行
 
 ```bash
-# 在设备上（root）
-dpkg -i /var/mobile/com.dsh.iagent_1.0.0_iphoneos-arm64.deb
+# 在设备上（root）；RootHide 换成 ..._iphoneos-arm64e.deb
+dpkg -i /var/mobile/com.dsh.iagent_1.0.1_iphoneos-arm64.deb
+# 如果 dpkg 报状态中断，先修复再重试
+dpkg --configure -a
 # 依赖或权限有问题时
 apt-get -f install
 ```
