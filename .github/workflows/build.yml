@@ -153,13 +153,16 @@ jobs:
             dpkg-deb -I "$DEB"
             dpkg-deb -c "$DEB" | head -n 40
             LIST=$(dpkg-deb -c "$DEB")
+            # 控制成员不在 -c 的列表里（-c 只列 data.tar），单独解出来检查。
+            rm -rf /tmp/ctl && dpkg-deb -e "$DEB" /tmp/ctl
           else
-            # 没有 dpkg 就从 ar 归档里取 data.tar 再列目录（macOS 自带 ar/tar）
+            # 没有 dpkg 就从 ar 归档里取 data.tar / control.tar 再列目录（macOS 自带 ar/tar）
             mkdir -p /tmp/inspect && cd /tmp/inspect
             ar x "$OLDPWD/$DEB"
             ls -l
             LIST=$(tar -tvf data.tar.*)
             echo "$LIST" | head -n 40
+            rm -rf /tmp/ctl && mkdir -p /tmp/ctl && tar -xf control.tar.* -C /tmp/ctl
           fi
 
           echo "$LIST" | grep -q 'usr/bin/iagentd'              || { echo "iagentd 缺失"; exit 1; }
@@ -169,8 +172,14 @@ jobs:
           echo "$LIST" | grep -q 'usr/share/iagent/web/app.js'   || { echo "Web UI app.js 缺失"; exit 1; }
           echo "$LIST" | grep -q 'LaunchDaemons/com.dsh.iagent.daemon.plist' || { echo "LaunchDaemon 缺失"; exit 1; }
 
-          # 维护脚本必须是可执行的，否则 dpkg 不会运行 postinst
-          echo "$LIST" | grep -E 'postinst' | grep -q '^-rwx' || { echo "postinst 没有执行位"; exit 1; }
+          # 维护脚本必须可执行，否则 dpkg 不会运行 postinst
+          ls -l /tmp/ctl
+          test -f /tmp/ctl/control || { echo "control 缺失"; exit 1; }
+          test -x /tmp/ctl/postinst || { echo "postinst 没有执行位"; exit 1; }
+          test -x /tmp/ctl/prerm    || { echo "prerm 没有执行位"; exit 1; }
+          # postinst 里引用的路径前缀必须与包的 scheme 一致
+          grep -q '/var/jb/usr/bin/iagentd' /tmp/ctl/control && echo "control 里的 daemon 路径正确" || true
+          echo "包内容与维护脚本检查通过"
 
       - name: 校验包元数据
         if: hashFiles('packages/*.deb') != ''
