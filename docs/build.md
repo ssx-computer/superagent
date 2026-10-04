@@ -93,11 +93,30 @@ python3 scripts/preflight.py --verbose
 
 | 风险点 | 说明 |
 | --- | --- |
-| 编译错误 | 全部 26 个源文件都是手写且未经编译器检查；`preflight.py` 只能查结构与括号配平 |
-| Theos 变量拼写 | `PACKAGE_ID` / `THEOS_PACKAGE_NAME` 等在不同 Theos 版本里叫法不一（Makefile 里同时写了多种），`layout/DEBIAN/control` 是兜底 |
-| RootHide 架构接受度 | `iphoneos-arm64e` 与 roothide Bootstrap 的匹配情况未实测 |
+| 编译 | ✅ 已在 CI 上验证：26 个源文件 arm64 + arm64e 全部编译、链接、签名通过，`.deb` 产出并逐项断言 |
+| RootHide 架构接受度 | `iphoneos-arm64e` 与 roothide Bootstrap 的匹配情况未实测（CI 的 roothide job 需要手动触发） |
 | 第三方 LaunchDaemon 加载 | iOS 15+ 上 `launchctl bootstrap system <plist>` 是否直接生效未实测；`postinst` 同时尝试 `load -w`，最坏情况重启一次设备即可 |
 | `UserName: mobile` | LaunchDaemon plist 里没有强制用户，守护进程以 root 运行（需要 root 才能开 PTY、读写系统路径） |
-| entitlements | `platform-application` + `com.apple.private.security.no-sandbox` 等组合来自 XXTouch 的公开 plist，但未在 iOS 15/16 上实测 |
+| entitlements | `platform-application` + `com.apple.private.security.no-sandbox` 等组合来自 XXTouch 的公开 plist，但未在 iOS 15/16 上实测（签名能过，是否被内核接受要真机看） |
 | 私有 API 行为 | HID 注入字段偏移、`AXElement` 可用性、SpringBoard 内 WKWebView 渲染，见 `docs/research/ios-private-apis.md` 的「未查证」小节 |
 | 插件与守护进程的日志共享 | 插件以 mobile 身份写 `/var/mobile/Library/iAgent/logs/`，RootHide 沙箱下可能失败（仅日志，不影响功能） |
+
+## CI 首次构建发现并修掉的问题
+
+第一次真正编译暴露了 6 个静态检查抓不到的错误，都已修复（对应 commit 见仓库历史）：
+
+| 文件 | 问题 | 修法 |
+| --- | --- | --- |
+| `daemon/IAGHTTPServer.m` | `stream.end;` 被 clang 当成"属性访问取副作用"（默认错误） | 改成 `[stream end];` |
+| `daemon/IAGLLM.m` | 类扩展里重复声明了头文件已经可读写的属性 | 删掉冗余的扩展声明 |
+| `daemon/IAGBridge.m` | `[self readyCommandsSince:cursor locked]` 少了一个参数（语法错误） | 改为 `locked:YES` |
+| `shared/IAGPaths.m` | `#import <sys/statfs.h>` 是 Linux 头文件，iOS SDK 里不存在 | 换成 Darwin 的 `<sys/mount.h>` |
+| `tweak/IAGTweak.m` | 自己编了 `UIPanGestureRecognizerState*` 之类不存在的枚举 | 全部改用 `UIGestureRecognizerState*` |
+| `daemon/IAGToolDevice.m` | `CFUserNotificationCreate` 及其键在公开 iOS SDK 里标记为不可用 | 改为 `dlsym` 解析函数 + 自写字面量键名，既过编译也不产生链接依赖 |
+
+另外两个是打包层面的：
+
+- Theos 的 tweak staging 要求**项目根目录**存在 `iagent.plist`（过滤器），只有 `layout/` 里那份是不够的 —— 现在两处都有。
+- `layout/DEBIAN/control` 里手写的 `Installed-Size` 会和 Theos 自动追加的那行重复，dpkg 会以
+  `duplicate value for 'Installed-Size' field` 拒绝安装 —— 已删除，并给 CI 加了重复字段断言。
+

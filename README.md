@@ -10,9 +10,13 @@
 **没有 WebDAV，没有云端中间层，没有服务器中转。** 设备上的守护进程直接在回环地址上提供
 HTTP + SSE 控制面，并由它自己通过 HTTPS 调用 OpenAI 兼容的模型接口；API Key 只存在本机。
 
-> **状态：源码完成，尚未编译、尚未在真机上运行。** 仓库里的任何"能跑"描述都只是设计意图；
-> 截止本文件写入时，本项目**没有经过一次 `make`、没有产出过 `.deb`、没有在任何 iOS 设备上安装或测试**。
-> 见 [已查证 / 未查证](#已查证--未查证)。
+> **状态：已在 GitHub Actions 上编译成功并产出 `.deb`；尚未在真机上安装运行。**
+> 在 macOS runner（Xcode 16.4 / iPhoneOS 16.5 SDK）上 `iagentd` 与 `iagent.dylib` 都已
+> arm64 + arm64e 编译、链接、签名通过，包内容与元数据断言全部通过，产物从
+> [Actions](https://github.com/ssx-computer/superagent/actions/workflows/build.yml) 的
+> Artifacts 下载即得 `com.dsh.iagent_1.0.0_iphoneos-arm64.deb`（约 208 KB）。
+> **仍未验证的**：装到越狱设备、守护进程真机启动、HID/AX 注入、SpringBoard 内嵌 WebView、
+> RootHide 实机路径 —— 见 [已查证 / 未查证](#已查证--未查证)。
 
 ---
 
