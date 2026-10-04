@@ -109,9 +109,9 @@ SpringBoard 进程内（HID 注入需要 SpringBoard 自己的 entitlements）�
 
 三种方式，都指向同一个 `http://127.0.0.1:8080/`（端口按 `port` 配置）：
 
-1. **单击悬浮球** —— 先探测 `/api/health`；daemon 活着就在 SpringBoard 内用 WKWebView 打开面板，
-   否则弹一条"守护进程 iagentd 未在运行"的提示。面板加载 6 秒未完成会自动改用浏览器打开
-   （SpringBoard 内 WKWebView 在 iOS 15/16 上有空白渲染的公开报告，见
+1. **单击悬浮球** —— 后台用 3 秒超时探一次 `/api/health`（JSON 接口、免鉴权）；活着就在 SpringBoard
+   内用 WKWebView 打开面板，否则弹一条"守护进程 iagentd 未在运行"的提示。面板加载 6 秒未完成会自动
+   改用浏览器打开（SpringBoard 内 WKWebView 在 iOS 15/16 上有空白渲染的公开报告，见
    [docs/research/ios-private-apis.md](docs/research/ios-private-apis.md) §8）。
 2. **长按悬浮球** —— 弹出菜单：打开控制面板 / 在浏览器中打开 / 隐藏悬浮球（本次会话内隐藏，
    重启后恢复）/ 取消。悬浮球可拖动，位置与左右侧会写回配置。
@@ -128,12 +128,13 @@ SpringBoard 进程内（HID 注入需要 SpringBoard 自己的 entitlements）�
 - **只监听回环**：HTTP 服务器 `bind` 到 `INADDR_LOOPBACK`，代码里写死"loopback only, by design"，
   没有对外监听选项。
 - **鉴权可选**：`authToken` 为空时所有 `/api/*` 都不校验（仅 `/api/health` 始终免鉴权，供 UI 探活）；
-  一旦设置，除 `/api/health` 外的接口都要求 `X-IAG-Token` 头或 `?token=`。**没有 TLS**，明文 HTTP
-  只跑在回环上。
+  一旦设置，除 `/api/health` 外的接口都要求 `X-IAG-Token` 头或 `?token=`。静态 Web 文件（`/`、
+  `index.html`、`app.js`、`style.css`）**不走鉴权**。**没有 TLS**，明文 HTTP 只跑在回环上。
 - **审批模式**：`approvalMode` = `auto` | `dangerous` | `always`，默认 `dangerous`。`dangerous`
   下命中所见即所得的破坏性规则（删除、重启、系统目录写入、界面自动化等）会在执行前要求确认。
-- **命令黑名单**：`blockedCommands`（默认 10 条，如 `rm -rf /`、`mkfs`、`nvram`）对 `shell_exec`
-  无条件生效，返回 403 / 工具失败，与审批模式无关。
+- **命令黑名单**：`blockedCommands`（默认 10 条，如 `rm -rf /`、`mkfs`、`nvram`）按"命令小写后的
+  子串包含"匹配，对三个 shell 入口（agent 工具循环、`/api/tools/call`、`/api/exec`）都生效，
+  命中直接拒绝（HTTP 入口返回 403），与审批模式无关。
 - **删除保护名单**：`fs_delete` 对 `/`、`/System`、`/var`、`/var/jb`、`/var/mobile`、
   `/private/var/db` 等路径硬性拒绝。
 - **API Key 明文**：`/var/mobile/Library/iAgent/config.plist` 里是明文，文件权限 0644（tweak 以
@@ -204,12 +205,31 @@ iagent/
 
 ---
 
+## 已知的代码问题
+
+写文档时逐行比对源码，发现下列问题**在代码里**（不是文档笔误）。前四条已在本轮修掉，其余是设计
+取舍或轻微不一致，保留记录以便后续维护：
+
+| 位置 | 问题 | 状态 |
+|---|---|---|
+| `tweak/IAGTweak.m` `openPanel` | 存活探测用 `IAGHTTPJSON` GET 面板地址 `/`，但该函数要求响应能解析成 JSON 字典，而 `/` 返回的是 `index.html`（HTML）。默认配置下（`openInSafari=false`）单击悬浮球会**永远**走到"守护进程 iagentd 未在运行"分支。 | ✅ 已修：改探 `/api/health`（JSON 且免鉴权） |
+| `daemon/IAGToolFile.m` `IAGPathIsProtectedFromDelete` | 删除保护名单里的 `/var/jb/...` 条目是硬编码的：RootHide 的真实 jbroot（`/var/containers/Bundle/Application/.jbroot-xxxx/Library/...`）不在保护范围内。 | ✅ 已修：按 `IAGJailbreakRoot()` 再判一次 `Library` / `usr` / `Applications` / `Library/dpkg` / `Library/MobileSubstrate` |
+| `daemon/IAGTool.m` `fs_write` 审批判据 | 敏感路径只硬编码了 `/System`、`/var/jb/Library`、`/private`，RootHide 的真实 jbroot 绝对路径会静默放行。 | ✅ 已修：额外按真实 jbroot 前缀判一次，并补上 `$IAG_JBROOT` 前缀与相对路径两类判据 |
+| `tweak/` 桥接能力声明 | 插件用 `caps=hid:1,ax:1,notify:cf` 而非 JSON，且 daemon 在解析后又把它清空，导致 `/api/bridge/status.capabilities` 永远是 `{}`。 | ✅ 已修：daemon 两种格式都收且不再清空 |
+| `daemon/IAGTool.m` `approvalReasonForTool` | `dangerous` 模式下 `[name hasPrefix:@"ui_"]` 让**所有** `ui_*` 都需审批——包括只读的 `ui_describe` 和 `isDangerous=NO` 的 `ui_open_url`；反过来 `app_launch` 的分支是 `&& dangerousTool`，而它 `isDangerous` 为 `NO`，所以**从不**触发审批。 | 设计取舍：界面类工具一律确认更安全；`ui_open_url`/`ui_describe` 若嫌吵可把 `approvalMode` 设为 `auto` |
+| `daemon/IAGConfig.h` | 拖悬浮球时会写 `bubbleY` 键，但头文件只声明了 `bubbleSide`（`kIAGKeyTopButtonSide`），`bubbleY` 走通用字典存取。 | 轻微：不影响功能 |
+| `layout/DEBIAN/control` | `Architecture` 写死 `iphoneos-arm64`；Theos 实际按 Makefile 的 scheme 决定架构，这个文件是人工打包时的参照。 | 已知：RootHide（arm64e）线需相应调整 |
+| `tweak/IAGAutomation.m` | HID/AX 后端信息用 `NSLog` 输出，不写 `/var/mobile/Library/iAgent/logs/iagent.log`。 | 已知：排错需看设备控制台 |
+
+---
+
 ## 已查证 / 未查证
 
 **编写这些文档时对代码可查证的**（逐行读过源码）：接口路径与字段、配置键与默认值、工具参数
 schema、危险标记、黑名单与删除保护名单、审批判定分支、HTTP 服务器的连接上限与 SSE 帧格式、
 桥接的 command id / cursor / 20 秒连接窗口 / 5 分钟保留期、会话 400 条上限与历史窗口、
-PTY 的 512KB 环形缓冲与 8 会话上限、cron 的 5 秒 tick、路径探测顺序、entitlements 与 plist 内容。
+PTY 的 512KB 环形缓冲与 8 会话上限、cron 的"启动 5 秒后首次、之后每 15 秒"tick 与 600 秒执行超时、
+路径探测顺序、entitlements 与 plist 内容。
 
 **未查证的**（没有编译、没有真机）：
 
@@ -222,8 +242,9 @@ PTY 的 512KB 环形缓冲与 8 会话上限、cron 的 5 秒 tick、路径探�
 - AX（`AXElement`）所需的确切 entitlement、SpringBoard 内 WKWebView 空白渲染的具体机理与
   ATS/entitlement 键名 —— memo 2 §13。
 - daemon 直接 `openApplicationWithBundleID:` 能否把 App 拉到前台、`CFUserNotificationCreate` 从纯
-  root daemon 调用能否显示 —— memo 2 §5.2 / §6.2 / §13。因此 `app_launch` 与 `notify_send` 都实现了
-  "先 daemon 自己试、失败再交给桥接"的回退链，但两条链都未在设备上验证。
+  root daemon 调用能否显示 —— memo 2 §5.2 / §6.2 / §13。因此 `app_launch` / `ui_open_url` 实现为
+  "先 daemon 侧 `LSApplicationWorkspace`、失败再交给桥接"，`notify_send` 则是"先桥接、失败退回
+  `CFUserNotification`"，三条链都未在设备上验证。
 - HID 键位映射、`IOHIDEventSystemClientCreate` 在 iOS 15/16 上的实际可用性 —— memo 2 §3 有已查证的
   调用序列，但本项目没有跑过一次注入。
 - PTY：以 `mobile` 身份开 PTY 的权限差异、多会话上限 —— memo 2 §13 第 8 条。

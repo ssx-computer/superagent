@@ -367,7 +367,12 @@ static NSDictionary *IAGHTTPJSON(NSString *method, NSString *urlString, NSDictio
     // Is the daemon up? If not, Safari would show the same error but with a
     // worse explanation, so say it here instead.
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSDictionary *health = IAGHTTPJSON(@"GET", [self panelURLString], nil, [[IAGConfig shared] authToken], 3);
+        // 探活必须打 /api/health：只有它是 JSON（IAGHTTPJSON 要求能解析成字典），
+        // 而且它免鉴权。以前这里探的是面板地址，返回的是 index.html，
+        // 解析必然失败，于是单击悬浮球永远被误判成"守护进程未运行"。
+        NSString *healthURL = [NSString stringWithFormat:@"http://%s:%ld/api/health",
+                               IAG_DEFAULT_HOST.UTF8String, (long)[[IAGConfig shared] port]];
+        NSDictionary *health = IAGHTTPJSON(@"GET", healthURL, nil, [[IAGConfig shared] authToken], 3);
         dispatch_async(dispatch_get_main_queue(), ^{
             if (health) [self openPanelInProcess];
             else {

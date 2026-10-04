@@ -57,7 +57,7 @@ com.apple.private.security.storage.AppDataContainers
 
 ### 2. 硬拦截
 
-- `blockedCommands`（配置项，默认空）：命中即**直接拒绝执行**，与审批模式无关，且不会给模型第二次机会。适合放你自己绝对不想要的命令（例如 `apt upgrade`）。三个 shell 入口（`/api/chat` 的工具循环、`/api/tools/call`、面板里的 `/api/exec` 快速命令）都会查它。
+- `blockedCommands`（配置项，默认 10 条：`rm -rf /`、`rm -rf /var`、`rm -rf /System`、`rm -rf /private`、`mkfs`、`dd if=/dev/zero of=/dev/disk`、`:(){ :|:& };:`、`mv /System`、`chmod -R 000 /`、`nvram`）：命中即**直接拒绝执行**，与审批模式无关，且不会给模型第二次机会。适合放你自己绝对不想要的命令（例如 `apt upgrade`）。匹配规则是**命令小写后的子串包含**。三个 shell 入口（`/api/chat` 的工具循环、`/api/tools/call`、面板里的 `/api/exec` 快速命令）都会查它。
 - `fs_delete` 的不可删除清单（`IAGPathIsProtectedFromDelete`）：
 
   - 精确匹配：`/`、`/var`、`/System`、`/private`、`/Applications`、`/usr`、`/bin`、`/sbin`、`/etc`、`/Library`、`/var/jb`、`/var/mobile`、`/var/containers`、`/var/root`、`/private/var`、`/private/var/db`、`/private/var/lib`、`/private/etc`、`/var/jb/Library`、`/var/jb/usr`、`/var/jb/usr/lib`、`/var/jb/Library/dpkg`、`/var/jb/Applications`、`/var/jb/Library/MobileSubstrate`
@@ -71,7 +71,7 @@ com.apple.private.security.storage.AppDataContainers
 
 - 工具输出回灌给模型前截断到 16000 字符，避免一次读取把上下文和费用顶爆；
 - `requestLogging` 打开后会把模型请求/响应写进日志（含会话内容），排错用，默认关闭；
-- 日志文件 `/var/mobile/Library/iAgent/logs/iagentd.log` 为 0644，超过阈值自动轮转为 `.1`（只保留一代）。
+- 日志文件 `/var/mobile/Library/iAgent/logs/iagent.log` 为 0644（daemon 与插件共用），超过 4MB 自动轮转为 `.1`（只保留一代）。
 
 ## 静态数据
 
@@ -79,7 +79,7 @@ com.apple.private.security.storage.AppDataContainers
 | --- | --- | --- | --- |
 | 全部设置（含 `apiKey`、`authToken`、`baseUrl`） | `/var/mobile/Library/iAgent/config.plist` | 0644，root 写、mobile 读 | **明文**，没有钥匙串。RootHide 下插件写它可能失败 |
 | 会话历史 | `/var/mobile/Library/iAgent/sessions/*.json` | 0644 | 含完整对话与工具输出（可能包含密码、token 等命令里出现过的字符串） |
-| 定时任务 | `/var/mobile/Library/iAgent/cron.json` | 0644 | 含要执行的命令 |
+| 定时任务 | `/var/mobile/Library/iAgent/cron.plist` | 0644 | 含要执行的命令 |
 | 日志 | `/var/mobile/Library/iAgent/logs/` | 0644 | 视 `logLevel` 可能含命令与输出 |
 
 App Store 应用受沙箱限制读不到 `/var/mobile/Library/`，但这在越狱设备上不是安全边界：**任何越狱进程、任何 tweak 都能读到明文 API Key**。

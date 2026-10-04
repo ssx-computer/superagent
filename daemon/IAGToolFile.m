@@ -76,6 +76,24 @@ static BOOL IAGPathIsProtectedFromDelete(NSString *path)
     for (NSString *prefix in prefixes) {
         if ([normalized hasPrefix:prefix]) return YES;
     }
+
+    // RootHide 没有 /var/jb：真实 jbroot 是
+    // /var/containers/Bundle/Application/.jbroot-<hex>。上面那批字面量都匹配不上，
+    // 所以再按真实的越狱根目录判一次，否则 RootHide 上这些关键目录可被删除。
+    NSString *jbroot = [IAGJailbreakRoot() stringByStandardizingPath];
+    if (jbroot.length > 1 && ![jbroot isEqualToString:@"/"]) {
+        while (jbroot.length > 1 && [jbroot hasSuffix:@"/"]) {
+            jbroot = [jbroot substringToIndex:jbroot.length - 1];
+        }
+        for (NSString *sub in @[@"Library", @"usr", @"usr/lib", @"Applications",
+                                @"Library/dpkg", @"Library/MobileSubstrate"]) {
+            if ([normalized isEqualToString:[jbroot stringByAppendingPathComponent:sub]]) return YES;
+        }
+        for (NSString *sub in @[@"Library/dpkg/", @"Library/MobileSubstrate/DynamicLibraries/"]) {
+            // 用格式串拼接以保留结尾的 "/"，避免把 <jbroot>/Library/dpkgfoo 也误判成受保护。
+            if ([normalized hasPrefix:[jbroot stringByAppendingFormat:@"/%@", sub]]) return YES;
+        }
+    }
     return NO;
 }
 

@@ -8,6 +8,7 @@
 #import "IAGBridge.h"
 #import "IAGJSON.h"
 #import "IAGLog.h"
+#import "IAGPaths.h"
 
 // Per-category registration entry points (defined in the IAGTool*.m files).
 void IAGRegisterShellTools(IAGToolRegistry *registry);
@@ -268,6 +269,12 @@ NSDictionary *IAGToolFailure(NSString *error)
         if ([path hasPrefix:@"/System"] || [path hasPrefix:@"/var/jb/Library"] ||
             [path hasPrefix:@"/private"]) {
             return [NSString stringWithFormat:@"写入系统路径 %@", path];
+        }
+        // RootHide 的 jbroot 是随机路径，字面量 /var/jb 匹配不上，按真实根目录再判一次。
+        NSString *jbroot = IAGJailbreakRoot();
+        if (jbroot.length > 1 && ![jbroot isEqualToString:@"/"] &&
+            [path hasPrefix:[jbroot stringByAppendingString:@"/"]]) {
+            return [NSString stringWithFormat:@"写入越狱根目录内的路径 %@", path];
         }
         if (relative) {
             return [NSString stringWithFormat:@"写入相对路径 %@（目标由 workDir 决定）", path];

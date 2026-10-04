@@ -61,7 +61,7 @@ curl -s http://127.0.0.1:8080/api/health | head -c 400
 
 # 4) 插件是否加载
 ls -l /var/jb/Library/MobileSubstrate/DynamicLibraries/iagent.dylib   # RootHide 换成 <jbroot>/...
-tail -n 50 /var/mobile/Library/iAgent/logs/iagentd.log
+tail -n 50 /var/mobile/Library/iAgent/logs/iagent.log
 ```
 
 `/api/health` 返回的 JSON 里包含设备型号、系统版本、注入桥接是否连接、工具数量、HTTP 统计，是判断「装好没有」最快的方式。
@@ -70,7 +70,7 @@ tail -n 50 /var/mobile/Library/iAgent/logs/iagentd.log
 
 | 文件 | 内容 |
 | --- | --- |
-| `/var/mobile/Library/iAgent/logs/iagentd.log` | 守护进程日志（也含插件通过同一路径写入的日志） |
+| `/var/mobile/Library/iAgent/logs/iagent.log` | daemon 与插件共用的日志（超过 4MB 轮转为 `.1`，只保留一代）；插件里 `IAGAutomation` 的 HID/AX 后端信息走 `NSLog`，要看设备控制台 |
 | `/var/mobile/Library/iAgent/logs/iagentd.out.log` | stdout（LaunchDaemon 重定向） |
 | `/var/mobile/Library/iAgent/logs/iagentd.err.log` | stderr，启动崩溃看这里 |
 
@@ -90,7 +90,7 @@ tail -n 50 /var/mobile/Library/iAgent/logs/iagentd.log
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 看不到悬浮球 | 插件没被注入：确认 `/Library/MobileSubstrate/DynamicLibraries/iagent.dylib` 与 `iagent.plist` 都在 jbroot 下、`iagent.plist` 的 Filter 只含 `com.apple.springboard`；然后 respring。仍未出现就看 `iagentd.log` 里的 `HID backend` / `AX backend` 行——构造器里任何异常都会被吞掉，只留日志 |
+| 看不到悬浮球 | 插件没被注入：确认 `/Library/MobileSubstrate/DynamicLibraries/iagent.dylib` 与 `iagent.plist` 都在 jbroot 下、`iagent.plist` 的 Filter 只含 `com.apple.springboard`；然后 respring。仍未出现就看设备控制台里插件的 `[iAgent] HID backend:` / `[iAgent] AX backend:`（这两行走 `NSLog`，不写日志文件），以及 `/var/mobile/Library/iAgent/logs/iagent.log` 里的 `iAgent tweak 1.0.0 已载入 SpringBoard`——构造器里任何异常都会被吞掉，只留日志 |
 | 悬浮球点了没反应 | 守护进程没起来（面板会提示「守护进程 iagentd 未在运行」）。`iagentd --print-paths` 手动跑一次，看是不是路径/权限问题 |
 | 控制面板白屏 | SpringBoard 内嵌 WKWebView 渲染失败（iOS 15/16 已知问题）。插件在 6 秒超时后自动改用 Safari；也可以用长按菜单 →「在浏览器中打开」 |
 | 面板打不开、提示连接失败 | 端口被占用或改了端口没重启守护进程；`curl http://127.0.0.1:8080/api/health` 先确认守护进程活着 |
@@ -99,7 +99,7 @@ tail -n 50 /var/mobile/Library/iAgent/logs/iagentd.log
 | 悬浮球拖动后位置不记住 | 插件（mobile 用户）在 RootHide 沙箱下可能写不了 `config.plist`，位置是尽力而为 |
 | `ui_*` 工具报「桥接未连接」 | 插件没加载或刚 respring 完还在连接。`/api/health` 的 `bridge.connected` 字段可以直接看到状态 |
 | `ui_describe` 说无障碍不可用 | `AXRuntime` 的 `AXElement` 在当前系统上不可用（未在真机验证过）。改用 `ui_tap` 的 `x`/`y` 坐标 |
-| 终端没有输出 / 卡住 | 只支持真 PTY；`/api/term/open` 创建失败通常是 `/bin/sh` 或 `/var/jb/bin/sh` 不存在。`iagentd --print-paths` 看 rootfs 解析 |
+| 终端没有输出 / 卡住 | 只支持真 PTY；`/api/term/open` 创建失败通常是找不到可用 shell（依次尝试 `/bin/zsh`、`/var/jb/bin/zsh`、`/bin/bash`、`/var/jb/bin/bash`、`/bin/sh`，最后兜底 `/bin/sh`）。单个 daemon 最多 8 个终端会话，超出会报「终端数量已达上限（8）」 |
 | 定时任务不执行 | 守护进程必须在跑（cron 在守护进程内）。`cron_list` 看 `lastResult` / `lastExitCode`；时间按设备本地时区 |
 
 ## 卸载

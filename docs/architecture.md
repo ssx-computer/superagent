@@ -44,7 +44,7 @@
                             iagent.dylib 在 SpringBoard 主线程执行
 ```
 
-HTTP 服务是手写的（`IAGHTTPServer`）：每连接一个线程，支持 `Content-Length` 请求体、SSE 流（`IAGHTTPStream`，带 10 秒心跳注释行）、静态文件（带路径穿越防护与 `no-cache`）。不依赖任何第三方库。
+HTTP 服务是手写的（`IAGHTTPServer`）：绑定 `INADDR_LOOPBACK`，每连接一个线程（上限 32，超出直接回 503），支持 `Content-Length` 请求体、SSE 流（`IAGHTTPStream`，带 10 秒心跳注释行）、静态文件（带路径穿越防护与 `no-cache`）。不依赖任何第三方库。
 
 ## Agent 循环（`IAGAgent`）
 
@@ -54,7 +54,7 @@ HTTP 服务是手写的（`IAGHTTPServer`）：每连接一个线程，支持 `C
 - 工具结果回灌给模型前会截断（`kIAGToolOutputLimit = 16000` 字符），避免一次 `cat` 大文件把上下文顶爆。
 - 审批：`approval_required` 事件携带 `id`/`name`/`arguments`/`reason`，`IAGApprovalCenter` 用 `NSCondition` 阻塞该会话线程等待 `/api/approve`，超时后按拒绝处理。
 - 中止：`/api/abort` 置位会话的中止标记，同时取消进行中的 LLM 请求（`[llm cancel]`），循环在下一个检查点退出并推送 `done`。
-- 未传工具参数时由 `IAGToolRegistry` 统一补齐 `durationMs` / `name` / `dangerous` 三个字段，前端不必自己算。
+- 每次执行后由 `IAGToolRegistry executeTool:` 在结果上附加 `name` / `dangerous` / `durationMs` 三个字段，前端不必自己算。
 
 ## 会话与存储
 
@@ -62,19 +62,19 @@ HTTP 服务是手写的（`IAGHTTPServer`）：每连接一个线程，支持 `C
 | --- | --- |
 | `/var/mobile/Library/iAgent/config.plist` | 全部设置（明文，0644） |
 | `/var/mobile/Library/iAgent/sessions/<id>.json` | 一个会话的消息数组（上限 400 条，超出从头裁剪） |
-| `/var/mobile/Library/iAgent/cron.json` | 定时任务 |
-| `/var/mobile/Library/iAgent/logs/iagentd.log` | 日志（超过阈值自动轮转成 `.1`） |
+| `/var/mobile/Library/iAgent/cron.plist` | 定时任务（plist 数组，每项即 `task.json` 的形状） |
+| `/var/mobile/Library/iAgent/logs/iagent.log` | daemon 与插件共用的日志（超过 4MB 轮转成 `.1`，只保留一代） |
 | `/var/mobile/Library/iAgent/logs/iagentd.{out,err}.log` | LaunchDaemon 的 stdout / stderr |
 
 数据目录固定在 rootfs 上而不是 jbroot 里：RootHide 的随机 jbroot 会随越狱更新变化，用户数据不该跟着消失。这也是插件（mobile）读配置的地方——RootHide 沙箱可能拒绝插件写这里，因此插件侧的写入全部是 best-effort。
 
 ## 终端（PTY）
 
-`IAGTerminal` 用 `openpty()` + `fork()` + `login_tty()` 起真 shell（依次尝试 `/bin/sh`、`<jbroot>/bin/sh`、`/var/jb/usr/bin/sh`），每会话一个读线程把输出追加到环形缓冲；前端用 `readSince:` 游标增量拉取（`/api/term/read?since=N`），本地用一个最小 ANSI 模拟器上色。`/api/term/input` 直接写 PTY，`/api/term/resize` 走 `TIOCSWINSZ`，`/api/term/close` 关 fd 并回收子进程。
+`IAGTerminal` 优先用 `forkpty`（`dlsym` 探测），取不到时退回 `posix_openpt` / `grantpt` / `unlockpt` / `ptsname` + `fork` + `execve`，子进程 argv[0] 带 `-` 前缀（登录 shell）。默认 shell 依次尝试 `/bin/zsh`、`/var/jb/bin/zsh`、`/bin/bash`、`/var/jb/bin/bash`、`/bin/sh`（每个都过 `IAGResolveRootlessPath`），最后兜底 `/bin/sh`；**最多 8 个并发会话**。每会话一个读线程把输出追加到 512KB 环形缓冲；前端用 `readSince:` 游标增量拉取（`/api/term/read?since=N`），被截断的多字节字符只消费完整字节，下一轮再读。`/api/term/input` 直接写 PTY（`data` 或 `data_base64`），`/api/term/resize` 走 `TIOCSWINSZ`，`/api/term/close` 关 fd 并回收子进程。前端另有一个最小 ANSI 模拟器上色。
 
 ## 定时任务
 
-5 字段 cron（`分 时 日 月 周`，支持 `*`、`a,b`、`a-b`、`*/n`），`IAGScheduler` 每秒比对一次到期任务，用 `IAGProcess runShell:` 执行并记录 `lastResult` / `lastExitCode` / `nextRun`。任务在守护进程内跑，因此守护进程必须存活。
+5 字段 cron（`分 时 日 月 周`，支持 `*`、`a,b`、`a-b`、`*/n`），`IAGScheduler` 启动 5 秒后首次、之后每 15 秒（leeway 2 秒）比对一次到期任务，用 `IAGProcess runShell:` 执行（**超时固定 600 秒**、输出上限 128KB）并记录 `lastResult` / `lastExitCode` / `nextRun`。任务在守护进程内跑，因此守护进程必须存活。
 
 ## 桥接（bridge）
 
@@ -89,12 +89,12 @@ POST /api/bridge/result  { "id":"...", "ok":true, "output":"...", "error":"" }
 - 命令带唯一 `id`，插件执行后回传结果；`caps` 用来告诉守护进程当前可用的后端（HID / AX / 通知），`/api/health` 会把它显示出来。
 - 插件把每个动作丢到 SpringBoard 主线程执行，并带超时（普通动作 20 秒，`ui_type` 25 秒），超时返回明确错误而不是一直挂住。
 - 桥接离线时，`ui_*` 工具直接返回「桥接未连接」类错误；`notify_send` 会退回守护进程侧的 `CFUserNotification`（在 root 守护进程里不保证可见，因此会同时说明回退原因）。
-- `app_launch` / `ui_open_url` 先走桥接（在 SpringBoard 里能拿到完整 LaunchServices 行为），失败再退回守护进程侧的 `LSApplicationWorkspace`。
+- `app_launch` / `ui_open_url` 的顺序是**反过来的**：先在守护进程侧用 `LSApplicationWorkspace`（`openApplicationWithBundleID:`、`openSensitiveURL:withOptions:`、`openURL:`）试一次，失败时再走桥接交给 SpringBoard 里的插件重试（裸 scheme 也走这条回退）。
 
 ## 插件内部（`iagent.dylib`）
 
 - **纯构造器**：`__attribute__((constructor))` 里判断 `NSBundle.mainBundle.bundleIdentifier == com.apple.springboard`，延迟 4 秒（等 SpringBoard 的场景就绪）后开始工作。没有任何 `%hook`，因此不依赖 substrate，也不会因为别人 hook 同一方法而互相影响。
-- **悬浮球**：一个 `UIWindow`（`windowLevel = 10000001.0`，比键盘还高）。**不调用 `makeKeyAndVisible`**，只设 `hidden = NO`，避免抢走 App 的 key 状态；`windowScene`（iOS 13+）必须显式赋值，否则窗口不显示。自定义 `hitTest:` 让窗口只在悬浮球区域内接收触摸，其余位置直接穿透给下层 App。拖动结束后吸附到左右边缘并把 `bubbleSide` / `bubbleY` 写进配置（失败就只在本次会话内有效）。
+- **悬浮球**：一个 `UIWindow`（`windowLevel = 10000001.0`，比键盘还高）。**不调用 `makeKeyAndVisible`**，只设 `hidden = NO`，避免抢走 App 的 key 状态；初始化时优先用当前前台 `UIWindowScene`，拿不到就退回 `initWithFrame:[UIScreen mainScreen].bounds`。自定义 `hitTest:` 让窗口只在悬浮球区域内接收触摸，其余位置直接穿透给下层 App。拖动结束后吸附到左右边缘并把 `bubbleSide` / `bubbleY` 写进配置（失败就只在本次会话内有效）。
 - **控制面板**：优先尝试在 SpringBoard 内嵌 `WKWebView`（带标题栏和「浏览器」「关闭」按钮）。iOS 15/16 上 SpringBoard 内嵌 WebKit 有白屏报告，所以设了 6 秒超时：没渲染出来就提示一次、标记本次会话改用 Safari，并自动用系统浏览器打开。页面用 `?token=<token>` 打开，前端会把它存进 `localStorage` 并从地址栏抹掉。
 - **触摸注入**：`IOHIDEventCreateDigitizerFingerEvent`（**归一化 0..1 坐标**）作为 child，包进 `IOHIDEventCreateDigitizerEvent` 父事件，`IOHIDEventAppendEvent` 之后在**主线程**用 `IOHIDEventSystemClientDispatchEvent` 投递，并盖上 `IOHIDEventSetSenderID`。字段偏移与顺序来自 XXTouch / ZXTouch 的公开实现，见 `docs/research/ios-private-apis.md`。
 - **文本输入**：ASCII 走 HID 键盘事件（USB HID usage 表，含大小写与符号 shift）；CJK 这类没有键位的字符先尝试写无障碍焦点元素的 `value`，失败则写剪贴板 + 模拟 ⌘V，之后还原剪贴板。
@@ -104,9 +104,10 @@ POST /api/bridge/result  { "id":"...", "ok":true, "output":"...", "error":"" }
 
 `IAGPaths` 不写死任何前缀：
 
-1. 先看自己的可执行文件路径（`_NSGetExecutablePath` / `NSProcessInfo`），往上找到包含 `usr/bin` 的 jbroot；
-2. 再尝试 libroothide 的 `JBROOT_PATH` / `jbroot_path()` / `jbroot("/")`（存在才用）；
-3. 都没有就按 rootfs（`/`）处理。
+1. 环境变量 `IAG_JBROOT`（调试 / 显式指定）；
+2. libroothide 的 `JBROOT_PATH` / `jbroot_path()` / `jbroot("/")`（`dlopen` 拿得到才用）；
+3. 从自己的可执行文件路径反推：取 `usr` 之前的部分，并要求 `<root>/usr/lib` 存在；
+4. 约定值 `/var/jb`；以上都不成立时按 rootful（`/`）处理。
 
 由此得到 `IAGJailbreakRoot()`、`IAGRootfs()`、`IAGIsRootless()`，其余路径（数据目录、日志、配置、Web 根目录、candidate 二进制路径）都在此基础上拼出来。`iagentd --print-paths` 可以把这些值直接打出来，排错时非常有用。
 
