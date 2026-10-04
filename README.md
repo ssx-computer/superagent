@@ -1,5 +1,8 @@
 # iAgent
 
+[![build](https://github.com/ssx-computer/superagent/actions/workflows/build.yml/badge.svg)](https://github.com/ssx-computer/superagent/actions/workflows/build.yml)
+[![platform](https://img.shields.io/badge/platform-iOS%2015%2B%20%C2%B7%20arm64%2Farm64e-blue)](#支持的系统)
+
 原生 iOS AI Agent：一个常驻的 root 守护进程（`iagentd`）+ 一个注入 SpringBoard 的 tweak
 （`iagent.dylib`）。模型直接调用设备上的工具来操作这台已越狱的 iPhone：跑 shell、读写文件、
 启动 App、发提示、管理定时任务、驱动界面（HID/AX）。
@@ -250,3 +253,17 @@ PTY 的 512KB 环形缓冲与 8 会话上限、cron 的"启动 5 秒后首次、
 - PTY：以 `mobile` 身份开 PTY 的权限差异、多会话上限 —— memo 2 §13 第 8 条。
 
 上述每一条都应该按 memo 里的真机验证清单复核后再当作事实。
+
+---
+
+## 构建状态与许可
+
+- 仓库：[`ssx-computer/superagent`](https://github.com/ssx-computer/superagent)
+- CI：[`.github/workflows/build.yml`](.github/workflows/build.yml) —— 先跑不依赖 Mac 的
+  `scripts/preflight.py` 结构自检，再用 Theos + iOS SDK 编译并由 `dpkg-deb` 断言包内容
+  （`iagentd`、`iagent.dylib`、Web UI、LaunchDaemon 是否都在，`postinst` 是否有执行位）。
+  产物在 Actions 的 Artifacts 里；打 `v*` tag 会自动建 Release 并附上 `.deb`。
+  RootHide（arm64e）版本走手动触发（Actions → Run workflow → `roothide=true`）。
+- 许可：仓库根目录的 [Apache License 2.0](https://github.com/ssx-computer/superagent/blob/main/LICENSE)
+  覆盖本仓库代码。**注意**：修改系统私有 API、以 root 权限运行命令带来的一切后果由使用者自行承担；
+  本项目仅供在自有设备上研究与自动化使用。

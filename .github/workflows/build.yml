@@ -8,39 +8,105 @@ on:
   workflow_dispatch:
     inputs:
       roothide:
-        description: '同时构建 RootHide (roothide/theos) 版本'
+        description: '同时构建 RootHide (roothide/theos, arm64e) 版本'
         required: false
         default: 'false'
+        type: choice
+        options: [ 'false', 'true' ]
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ---------------------------------------------------------------------------
-  # Dopamine / rootless build. This is the primary artifact: rootless v2 rpaths
-  # let the very same binaries resolve on RootHide too.
+  # 快速结构自检：不需要 Mac，20 秒内就能把"文件被写坏/契约对不上"挡在昂贵的
+  # macOS 构建之前。macOS 任务是 10 倍计费，先跑这个能省很多时间。
+  # ---------------------------------------------------------------------------
+  checks:
+    name: 结构自检（无需 Mac）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 运行 scripts/preflight.py
+        run: python3 scripts/preflight.py --verbose
+
+      - name: 关键文件与维护脚本格式
+        run: |
+          set -eu
+          for f in Makefile entitlements.plist \
+                   layout/DEBIAN/control layout/DEBIAN/postinst layout/DEBIAN/prerm \
+                   layout/Library/LaunchDaemons/com.dsh.iagent.daemon.plist \
+                   layout/Library/MobileSubstrate/DynamicLibraries/iagent.plist \
+                   layout/usr/share/iagent/web/index.html \
+                   layout/usr/share/iagent/web/app.js \
+                   layout/usr/share/iagent/web/style.css \
+                   .github/workflows/build.yml; do
+            test -f "$f" || { echo "缺少文件: $f"; exit 1; }
+          done
+          # dpkg 不接受 CRLF 的维护脚本
+          for f in layout/DEBIAN/postinst layout/DEBIAN/prerm; do
+            head -n 1 "$f" | grep -q '^#!' || { echo "$f 缺少 shebang"; exit 1; }
+            if grep -q "$(printf '\r')" "$f"; then echo "$f 含 CRLF，dpkg 会报错"; exit 1; fi
+          done
+          echo "文件齐全，DEBIAN 脚本是 LF 且有 shebang"
+
+  # ---------------------------------------------------------------------------
+  # Dopamine / rootless 构建：主产物。rootless v2 的 rpath 同时包含
+  # /var/jb/* 与 @loader_path/.jbroot/*，所以同一份二进制在 RootHide 上也能解析依赖。
   # ---------------------------------------------------------------------------
   rootless:
     name: iAgent (rootless · Dopamine)
+    needs: checks
     runs-on: macos-15
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - name: 安装 Theos 与 iOS SDK
         run: |
-          set -e
+          set -euo pipefail
           export THEOS="$HOME/theos"
           git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+
+          # theos/sdks 整仓约 1GB，用稀疏检出只取一个 SDK。
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks
+          SDK=$(git -C /tmp/sdks ls-tree --name-only HEAD | grep -E '^iPhoneOS[0-9.]+\.sdk$' | sort -V | tail -n 1 || true)
+          if [ -z "${SDK:-}" ]; then
+            SDK=$(git -C /tmp/sdks ls-tree --name-only HEAD | grep -E '^iPhoneOS.*\.sdk$' | tail -n 1)
+          fi
+          echo "使用 SDK: $SDK"
+          git -C /tmp/sdks sparse-checkout set "$SDK"
           mkdir -p "$THEOS/sdks"
-          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz -o /tmp/sdks.tar.gz
-          tar -xzf /tmp/sdks.tar.gz -C /tmp
-          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
+          cp -R "/tmp/sdks/$SDK" "$THEOS/sdks/"
           ls "$THEOS/sdks"
+
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
           echo "$THEOS/bin" >> "$GITHUB_PATH"
 
+      - name: 安装 dpkg（Theos 会优先用它打包）
+        run: |
+          if ! command -v dpkg-deb >/dev/null 2>&1; then
+            brew install dpkg || echo "::warning::dpkg 安装失败，改用 ar/tar 校验包内容"
+          fi
+          command -v dpkg-deb && dpkg-deb --version | head -n 1 || true
+
       - name: 显示工具链版本
         run: |
+          uname -m
           xcodebuild -version
           "$THEOS/bin/ldid" -v 2>&1 | head -n 2 || true
 
@@ -56,14 +122,40 @@ jobs:
           set -e
           DEB=$(ls packages/*.deb | head -n 1)
           echo "package: $DEB"
-          dpkg-deb -I "$DEB"
-          dpkg-deb -c "$DEB" | head -n 40
-          # The daemon binary and the tweak must be present and executable.
-          dpkg-deb -c "$DEB" | grep -q 'usr/bin/iagentd' || { echo "iagentd missing"; exit 1; }
-          dpkg-deb -c "$DEB" | grep -q 'DynamicLibraries/iagent.dylib' || { echo "tweak missing"; exit 1; }
-          dpkg-deb -c "$DEB" | grep -q 'usr/share/iagent/web/index.html' || { echo "web ui missing"; exit 1; }
-          # Maintainer scripts must be executable.
-          dpkg-deb -c "$DEB" | grep -E 'postinst' | grep -q '^-rwx' || { echo "postinst not executable"; exit 1; }
+
+          if command -v dpkg-deb >/dev/null 2>&1; then
+            dpkg-deb -I "$DEB"
+            dpkg-deb -c "$DEB" | head -n 40
+            LIST=$(dpkg-deb -c "$DEB")
+          else
+            # 没有 dpkg 就从 ar 归档里取 data.tar 再列目录（macOS 自带 ar/tar）
+            mkdir -p /tmp/inspect && cd /tmp/inspect
+            ar x "$OLDPWD/$DEB"
+            ls -l
+            LIST=$(tar -tvf data.tar.*)
+            echo "$LIST" | head -n 40
+          fi
+
+          echo "$LIST" | grep -q 'usr/bin/iagentd'              || { echo "iagentd 缺失"; exit 1; }
+          echo "$LIST" | grep -q 'DynamicLibraries/iagent.dylib' || { echo "tweak 缺失"; exit 1; }
+          echo "$LIST" | grep -q 'usr/share/iagent/web/index.html' || { echo "Web UI 缺失"; exit 1; }
+          echo "$LIST" | grep -q 'LaunchDaemons/com.dsh.iagent.daemon.plist' || { echo "LaunchDaemon 缺失"; exit 1; }
+
+          # 维护脚本必须是可执行的，否则 dpkg 不会运行 postinst
+          echo "$LIST" | grep -E 'postinst' | grep -q '^-rwx' || { echo "postinst 没有执行位"; exit 1; }
+
+      - name: 校验包元数据
+        if: hashFiles('packages/*.deb') != ''
+        run: |
+          set -e
+          DEB=$(ls packages/*.deb | head -n 1)
+          if command -v dpkg-deb >/dev/null 2>&1; then
+            dpkg-deb -f "$DEB" Package Architecture Version Depends
+            ARCH=$(dpkg-deb -f "$DEB" Architecture)
+            test "$ARCH" = "iphoneos-arm64" || { echo "Architecture 应为 iphoneos-arm64，实际 $ARCH"; exit 1; }
+          else
+            echo "::warning::没有 dpkg-deb，跳过元数据校验"
+          fi
 
       - name: 上传 .deb
         uses: actions/upload-artifact@v4
@@ -71,6 +163,17 @@ jobs:
           name: iagent-rootless-deb
           path: packages/*.deb
           if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传构建日志（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            .theos/**/*.log
+            packages/**/*.log
+          if-no-files-found: ignore
 
       - name: 发布 Release（仅 tag）
         if: startsWith(github.ref, 'refs/tags/v')
@@ -79,18 +182,22 @@ jobs:
           files: packages/*.deb
           generate_release_notes: true
           body: |
-            iAgent 原生 iOS AI Agent。
+            iAgent —— 原生 iOS AI Agent 越狱插件。
 
             安装：下载 `.deb` 后用 Sileo / Zebra 打开，或 `dpkg -i`。
-            支持 iOS 15 及以上，Dopamine（rootless）与 RootHide 均可安装。
+            支持 iOS 15 及以上；Dopamine（rootless）与 RootHide 均可安装。
+
+            > 未在真机上验证过，请先在可恢复的设备上试。
 
   # ---------------------------------------------------------------------------
-  # RootHide build. Needs the roothide fork of Theos and arm64e; kept
-  # non-blocking because that fork moves independently of upstream Theos.
+  # RootHide 构建：需要 roothide 的 Theos 分支与 arm64e。该分支节奏与上游不同步，
+  # 所以保持非阻塞（continue-on-error），只在手动触发且选择 roothide=true 时运行。
   # ---------------------------------------------------------------------------
   roothide:
     name: iAgent (RootHide · arm64e)
+    needs: checks
     runs-on: macos-15
+    timeout-minutes: 45
     continue-on-error: true
     if: github.event_name == 'workflow_dispatch' && inputs.roothide == 'true'
     steps:
@@ -98,15 +205,25 @@ jobs:
 
       - name: 安装 roothide/theos 与 iOS SDK
         run: |
-          set -e
+          set -euo pipefail
           export THEOS="$HOME/theos-roothide"
           git clone --recursive --depth 1 https://github.com/roothide/theos.git "$THEOS"
+
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git /tmp/sdks
+          SDK=$(git -C /tmp/sdks ls-tree --name-only HEAD | grep -E '^iPhoneOS[0-9.]+\.sdk$' | sort -V | tail -n 1 || true)
+          if [ -z "${SDK:-}" ]; then
+            SDK=$(git -C /tmp/sdks ls-tree --name-only HEAD | grep -E '^iPhoneOS.*\.sdk$' | tail -n 1)
+          fi
+          echo "使用 SDK: $SDK"
+          git -C /tmp/sdks sparse-checkout set "$SDK"
           mkdir -p "$THEOS/sdks"
-          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz -o /tmp/sdks.tar.gz
-          tar -xzf /tmp/sdks.tar.gz -C /tmp
-          cp -R /tmp/sdks-master/*.sdk "$THEOS/sdks/" 2>/dev/null || true
+          cp -R "/tmp/sdks/$SDK" "$THEOS/sdks/"
+
           echo "THEOS=$THEOS" >> "$GITHUB_ENV"
           echo "$THEOS/bin" >> "$GITHUB_PATH"
+
+      - name: 安装 dpkg
+        run: command -v dpkg-deb >/dev/null 2>&1 || brew install dpkg || true
 
       - name: 构建 .deb
         run: |
@@ -114,7 +231,8 @@ jobs:
           chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm
           make clean package FINALPACKAGE=1 IAG_ROOTHIDE=1 ARCHS=arm64e
           ls -l packages/
-          dpkg-deb -I packages/*.deb
+          DEB=$(ls packages/*.deb | head -n 1)
+          command -v dpkg-deb >/dev/null 2>&1 && dpkg-deb -f "$DEB" Package Architecture Version Depends || true
 
       - name: 上传 .deb
         uses: actions/upload-artifact@v4
@@ -122,3 +240,4 @@ jobs:
           name: iagent-roothide-deb
           path: packages/*.deb
           if-no-files-found: warn
+          retention-days: 30
