@@ -21,8 +21,11 @@
       <span class="brand-sub" id="appbar-ver"></span>
     </div>
     <div class="appbar-right">
-      <span class="conn-dot" id="conn-dot"></span>
-      <span class="conn-label" id="conn-label">检测中…</span>
+      <!-- 整块可点：点一下立刻重测守护进程（app.js 里 conn-label-box 绑了 onclick） -->
+      <span class="conn-label-box" id="conn-label-box" title="点这里立刻重测守护进程">
+        <span class="conn-dot" id="conn-dot"></span>
+        <span class="conn-label" id="conn-label">检测中…</span>
+      </span>
     </div>
   </header>
 
@@ -206,6 +209,19 @@
             <textarea id="set-systemPrompt" class="mono" rows="4" placeholder="你是一个 iOS 上的 AI Agent…"></textarea>
           </label>
           <button type="button" class="btn btn-sm btn-danger-ghost" id="set-apiKey-clear">清除已保存的 API Key</button>
+
+          <!-- 模型体检：分步检查 配置 → 网络 → 鉴权 → 模型列表 → 流式对话。
+               结果由 app.js 的 renderModelCheck() 渲染到 model-check-result。 -->
+          <div class="model-probe">
+            <div class="btn-row">
+              <button type="button" class="btn btn-sm" id="model-check-btn">测试模型</button>
+              <button type="button" class="btn btn-sm" id="model-list-btn">拉取模型列表</button>
+            </div>
+            <span class="hint">「测试模型」会用上面填写的 Base URL / API Key / 模型名真实发一次请求，
+              依次检查配置、网络、鉴权、模型是否在端点列表里，以及流式对话是否能收到数据。不用先保存。</span>
+            <div id="model-check-result"></div>
+            <div id="model-list"></div>
+          </div>
         </div>
 
         <div class="card hidden" id="set-run-card">

@@ -833,3 +833,117 @@ label.field > .switch-ui { margin-top: 8px; }
 /* 页内弹窗（插入 #modal-host）的正文段落，配合 .modal-body 使用 */
 .modal-msg { margin: 0 0 8px; font-size: 13.5px; color: var(--fg-dim); line-height: 1.5; }
 .modal-msg:last-child { margin-bottom: 0; }
+
+/* ==========================================================================
+ * 守护进程存活状态 / 模型体检（1.1.0）
+ *
+ * 新增的类：顶部状态徽标容器、掉线降级、守护进程重启提示卡片、
+ * 以及设置页「测试模型」的分步报告卡片。变量沿用上面的设计 token。
+ * ========================================================================== */
+
+/* ---------- 顶部状态徽标（点一下立刻重测） ---------- */
+.conn-label-box {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 7px; margin: -4px -7px;
+  border-radius: 9px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.conn-label-box:active { background: rgba(255, 255, 255, 0.07); }
+
+/* ---------- 掉线时整页降级（输入区灰掉，明确"现在发不出去"） ---------- */
+#app.daemon-offline .chat-inputbar { opacity: 0.55; }
+#app.daemon-offline #chat-input { color: var(--fg-muted); }
+#app.daemon-offline #chat-send { opacity: 0.4; }
+
+/* ---------- 聊天里的守护进程提示卡片 ---------- */
+/* .notice 基础样式是 flex 横排（给"文字 + 按钮"用的），这些卡片是纵排的多行内容 */
+.notice.daemon-notice { display: block; }
+.notice.daemon-notice.ok { background: rgba(48, 209, 88, 0.13); color: #86e6a2; }
+.notice.daemon-notice.info { background: rgba(10, 132, 255, 0.13); color: #8ec5ff; }
+.notice-title { font-weight: 600; line-height: 1.45; }
+.notice-line { margin-top: 4px; font-size: 12px; color: var(--fg-dim); line-height: 1.5; }
+.notice.daemon-notice.ok .notice-line,
+.notice.daemon-notice.info .notice-line { color: inherit; opacity: 0.85; }
+.notice-details { margin-top: 6px; }
+.notice-summary { font-size: 12px; color: var(--fg-dim); cursor: pointer; }
+.notice-pre {
+  margin: 6px 0 0; padding: 7px 9px;
+  max-height: 190px; overflow: auto;
+  background: rgba(0, 0, 0, 0.32);
+  border-radius: 8px;
+  font-family: var(--mono); font-size: 11px; line-height: 1.45;
+  white-space: pre-wrap; word-break: break-word;
+  color: var(--fg-dim);
+}
+.notice-path { margin-top: 5px; font-family: var(--mono); font-size: 11px; color: var(--fg-muted); word-break: break-all; }
+
+/* ---------- 设置页：模型体检 ---------- */
+.model-probe { margin-top: 14px; }
+.model-probe .hint { margin-top: 8px; }
+
+.model-check-head { margin-top: 12px; }
+.model-verdict { font-size: 13.5px; font-weight: 700; line-height: 1.45; }
+.model-verdict.ok { color: var(--green); }
+.model-verdict.bad { color: #ff9a92; }
+.model-hint { margin-top: 4px; font-size: 11.5px; color: var(--fg-dim); line-height: 1.5; }
+
+.model-steps {
+  margin-top: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.model-step {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+}
+.model-step:first-child { border-top: 0; }
+.model-step.ok { background: rgba(48, 209, 88, 0.07); }
+.model-step.fail { background: rgba(255, 69, 58, 0.09); }
+.model-step.skip { background: transparent; }
+.model-step-mark { flex: 0 0 auto; width: 13px; text-align: center; font-weight: 700; }
+.model-step.ok .model-step-mark { color: var(--green); }
+.model-step.fail .model-step-mark { color: var(--red); }
+.model-step.skip .model-step-mark { color: var(--fg-muted); }
+.model-step-body { min-width: 0; flex: 1 1 auto; }
+.model-step-name { font-weight: 600; color: var(--fg); }
+.model-step-ms { margin-left: 6px; font-family: var(--mono); font-size: 11px; font-weight: 400; color: var(--fg-muted); }
+.model-step-detail {
+  margin-top: 2px;
+  font-family: var(--mono); font-size: 11px; line-height: 1.5;
+  color: var(--fg-dim);
+  word-break: break-word; overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.model-models-title { margin-top: 11px; font-size: 11.5px; color: var(--fg-muted); }
+
+.model-ids { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 6px; }
+.model-id {
+  padding: 4px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg-dim);
+  font-family: var(--mono); font-size: 11px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.model-id:active { opacity: 0.6; }
+.model-id.current { border-color: var(--accent); color: #cfe6ff; background: rgba(10, 132, 255, 0.18); }
+.model-ids-hint { margin-top: 6px; font-size: 11px; color: var(--fg-muted); }
+
+/* 端点 200 但没有 SSE 数据（自建中转最常见的问题） */
+.notice-warn {
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 159, 10, 0.4);
+  border-radius: 10px;
+  background: rgba(255, 159, 10, 0.12);
+  color: #ffcf7a;
+  font-size: 12px;
+}
+.notice-warn .notice-line { color: inherit; opacity: 0.92; }

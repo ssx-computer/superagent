@@ -658,6 +658,14 @@ static const char *IAGStatusText(NSInteger status)
 - (void)serveConnection:(int)fd remote:(NSString *)remote
 {
     int one = 1;
+    // 双保险：进程级已经忽略了 SIGPIPE，但这里再给每个客户端 socket 单独关掉它。
+    // 浏览器关掉一个 SSE 流之后我们还会继续写（心跳/收尾），没有这一条，某些
+    // 路径下 write 会直接以 SIGPIPE 杀掉整个守护进程 —— 那就是用户看到的
+    // "连接被提前关闭（daemon 可能被杀/崩溃）"。
+    if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)) != 0) {
+        // 参数不支持不算致命（进程级 SIG_IGN 仍然兜着），但值得留一行日志。
+        IAGLogWarn(@"SO_NOSIGPIPE 设置失败: %s", strerror(errno));
+    }
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     struct timeval sendTimeout = { .tv_sec = 30, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));

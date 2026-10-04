@@ -25,11 +25,16 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!--
+        KeepAlive = true（无条件常驻）。原先的
+        <dict><key>SuccessfulExit</key><false/></dict> 只在"退出码非 0"时重启，
+        被信号杀死或被系统强制退出的守护进程不会被拉起来，控制面板就永远连不上了。
+        ThrottleInterval=5 防止崩溃循环打满 CPU。这个模板与
+        layout/Library/LaunchDaemons/com.dsh.iagent.daemon.plist 必须保持一致
+        （打包时后者会被转成 binary plist，postinst 用本模板覆盖它）。
+    -->
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
     <key>ThrottleInterval</key>
     <integer>5</integer>

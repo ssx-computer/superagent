@@ -75,6 +75,38 @@ static NSString *const kIAGDefaultSystemPrompt =
     return self;
 }
 
+- (instancetype)initWithBaseConfig:(IAGConfig *)base overrides:(NSDictionary *)overrides
+{
+    self = [super init];
+    if (self) {
+        _lock = [[NSLock alloc] init];
+        _values = [NSMutableDictionary dictionary];
+        [self loadDefaults];
+
+        // 先铺底：共享配置的当前值（只拷贝进程内的快照，不读盘）。
+        NSDictionary *snapshot = base ? [base snapshot] : nil;
+        if ([snapshot isKindOfClass:[NSDictionary class]]) {
+            for (NSString *key in snapshot) {
+                if (snapshot[key] == nil || snapshot[key] == [NSNull null]) continue;
+                _values[key] = snapshot[key];
+            }
+        }
+
+        // 再叠加覆盖值：只有基本类型才接受，避免把任意 JSON 树塞进配置。
+        if ([overrides isKindOfClass:[NSDictionary class]]) {
+            for (NSString *key in overrides) {
+                if (![key isKindOfClass:[NSString class]]) continue;
+                id value = overrides[key];
+                if (value == nil || value == [NSNull null]) continue;
+                if (![value isKindOfClass:[NSString class]] &&
+                    ![value isKindOfClass:[NSNumber class]]) continue;
+                _values[key] = value;
+            }
+        }
+    }
+    return self;
+}
+
 #pragma mark - defaults & persistence
 
 - (NSDictionary *)defaults

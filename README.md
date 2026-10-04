@@ -206,6 +206,7 @@ iagent/
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | 进程模型、HTTP/SSE、Agent 循环与审批、会话存储、PTY、cron、桥接、tweak 内部、路径解析 |
 | [docs/install.md](docs/install.md) | 前置条件、安装/卸载、postinst 做了什么、验证命令、故障排查 |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | **真机排障**：dpkg 已中断、发消息没反应、连接被提前关闭、守护进程被杀/重启、悬浮球不出现、架构选择、一键收集全部日志 |
 | [docs/tools.md](docs/tools.md) | 18 个工具的参数表、危险级别、示例与行为说明 |
 | [docs/api.md](docs/api.md) | 全部 HTTP 接口、SSE 事件、curl 示例 |
 | [docs/security.md](docs/security.md) | 威胁模型、黑名单、审批模式、entitlements、静态数据、加固建议 |

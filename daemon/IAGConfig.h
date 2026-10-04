@@ -37,6 +37,12 @@ extern NSString *const kIAGKeyTopButtonSide;     // tweak bubble hint: left | ri
 
 + (instancetype)shared;
 
+/// 在共享配置之上叠加一组"只存在于本次进程内"的覆盖值（例如模型体检时前端
+/// 传进来的 baseUrl/apiKey/model）。**绝不写盘**，因此不会污染 config.plist；
+/// 只支持 string/number/bool 这类基本类型的键，未知键直接忽略。
+- (instancetype)initWithBaseConfig:(IAGConfig *)base
+                         overrides:(NSDictionary *)overrides;
+
 /// Full internal snapshot, including the plaintext API key.
 - (NSDictionary *)snapshot;
 

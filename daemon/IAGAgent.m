@@ -198,23 +198,47 @@ static const NSUInteger kIAGToolOutputLimit = 16000;
            message:(NSString *)message
       eventHandler:(IAGAgentEventBlock)eventHandler
 {
+    // 事件流的收尾保证：本方法**无论从哪条路径返回，都必须恰好发一个 done**。
+    // 背景：预检失败（会话不存在、没配 API Key）以前只发 error 就 return，SSE 流没有
+    // 结束标记，前端会把它读成"连接被提前关闭（daemon 可能被杀/崩溃）"——完全误导，
+    // 用户以为守护进程崩了。emit 负责记账，finish 负责兜底补发。
+    __block BOOL emittedDone = NO;
+    __block NSString *terminalError = nil;
+
+    IAGAgentEventBlock wrapped = eventHandler;
     void (^emit)(NSString *, NSDictionary *) = ^(NSString *event, NSDictionary *payload) {
+        if ([event isEqualToString:@"done"]) emittedDone = YES;
         // 界面看到的错误也要落日志：用户报"没反应"时，日志是唯一能定位的东西。
         if ([event isEqualToString:@"error"]) {
+            terminalError = IAGStringOrEmpty(payload[@"message"]);
             IAGLogError(@"会话 %@ 出错: %@", sessionId, payload[@"message"] ?: @"");
         }
-        if (eventHandler) eventHandler(event, payload ?: @{});
+        if (wrapped) wrapped(event, payload ?: @{});
+    };
+    void (^finish)(void) = ^{
+        if (emittedDone) return;
+        emittedDone = YES;
+        emit(@"done", @{
+            @"messageId": sessionId,
+            @"steps": @0,
+            @"partial": @YES,
+            @"reason": terminalError.length ? @"error" : @"unknown",
+        });
     };
 
     IAGConfig *config = [IAGConfig shared];
     IAGSessionStore *store = [IAGSessionStore shared];
     IAGSession *session = [store sessionWithIdentifier:sessionId];
     if (!session) {
+        IAGLogError(@"会话 %@ 不存在，无法运行", sessionId);
         emit(@"error", @{ @"message": @"会话不存在" });
+        finish();
         return;
     }
     if ([config apiKey].length == 0) {
+        IAGLogError(@"尚未配置 API Key，会话 %@ 无法运行", sessionId);
         emit(@"error", @{ @"message": @"尚未配置 API Key，请打开设置页填写模型接口信息" });
+        finish();
         return;
     }
 
@@ -381,6 +405,7 @@ static const NSUInteger kIAGToolOutputLimit = 16000;
         emit(@"done", @{ @"messageId": sessionId, @"steps": @(steps),
                          @"aborted": @YES, @"usage": @{ @"total_tokens": @(totalTokens) } });
         IAGLogInfo(@"会话 %@ 的运行已被用户中止", sessionId);
+        finish();
         return;
     }
 
@@ -409,6 +434,10 @@ static const NSUInteger kIAGToolOutputLimit = 16000;
         IAGLogInfo(@"会话 %@ 完成: %ld 步, %ld 次工具调用, %ld tokens",
                    sessionId, (long)(steps - 1), (long)toolCallCount, (long)totalTokens);
     }
+
+    // 兜底：模型请求失败（emit error 后 break）等路径不会走到上面的 done，
+    // 这里补一个，保证"一次请求 = 恰好一个 done"。已经发过 done 时是空操作。
+    finish();
 }
 
 @end

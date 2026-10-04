@@ -10,6 +10,7 @@
 
 #import "IAGDaemon.h"
 #import "IAGConfig.h"
+#import "IAGDiagnostics.h"
 #import "IAGPaths.h"
 #import "IAGLog.h"
 #import "IAGVersion.h"
@@ -24,7 +25,11 @@ static IAGDaemon *gDaemon = nil;
 
 static void IAGHandleTerminationSignal(int signalNumber)
 {
-    // Async-signal-safe path: stop the socket, then leave.
+    // Async-signal-safe path: mark a clean exit in the running marker, stop the
+    // socket, then leave. Writing the marker is what tells the *next* start that
+    // this exit was intentional (a missing/dirty marker means "crashed", which
+    // bumps the restart counter shown in /api/health).
+    IAGDaemonHandleTerminationSignal(signalNumber);
     if (gDaemon) {
         @try { [gDaemon stop]; } @catch (NSException *exception) { (void)exception; }
     }
@@ -38,6 +43,11 @@ static void IAGInstallSignalHandlers(void)
     signal(SIGTERM, IAGHandleTerminationSignal);
     signal(SIGINT,  IAGHandleTerminationSignal);
     signal(SIGHUP,  IAGHandleTerminationSignal);
+
+    // 崩溃诊断：未捕获异常 + SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/SIGTRAP 写
+    // logs/iagentd-crash.log（含 backtrace），并让下一次启动能看出是哪个信号
+    // 杀死了守护进程。SIGTERM/SIGINT/SIGHUP 不在此列——那些是"正常停止"。
+    IAGInstallCrashHandlers();
 }
 
 static void IAGPrintUsage(const char *argv0)
@@ -67,6 +77,9 @@ static void IAGPrintPaths(void)
     printf("cron file      : %s\n", IAGCronPath().UTF8String);
     printf("sessions dir   : %s\n", IAGSessionsDir().UTF8String);
     printf("log file       : %s\n", IAGLogPath().UTF8String);
+    printf("crash log      : %s\n", IAGCrashLogPath().UTF8String);
+    printf("running marker : %s\n", IAGRunningMarkerPath().UTF8String);
+    printf("restart count  : %s\n", IAGRestartCountPath().UTF8String);
     printf("web root       : %s\n", IAGWebRoot().UTF8String);
     printf("web index      : %s\n", [IAGWebRoot() stringByAppendingPathComponent:@"index.html"].UTF8String);
     printf("device         : %s (%s) iOS %s\n", IAGDeviceModelIdentifier().UTF8String,
@@ -111,6 +124,12 @@ int main(int argc, char *argv[])
         IAGLogSetMirrorToStderr(YES);
         IAGLogInfo(@"iagentd %@ (build %@) 正在启动", IAG_VERSION_STRING, IAG_BUILD_STRING);
 
+        // 写运行标记并检测"上一次是否非正常退出"：标记文件路径 logs/running.marker，
+        // 计数持久化在 logs/restarts.count，结论会出现在 /api/health 里。
+        if (!IAGDaemonMarkStart()) {
+            IAGLogWarn(@"无法写入运行标记（%@），重启检测与崩溃取证将不可用", IAGRunningMarkerPath());
+        }
+
         gDaemon = [IAGDaemon shared];
         if (portOverride) gDaemon.portOverride = portOverride;
 
@@ -119,6 +138,9 @@ int main(int argc, char *argv[])
             IAGLogError(@"启动失败: %@", error.localizedDescription ?: @"未知错误");
             fprintf(stderr, "iagentd: 启动失败: %s\n",
                     (error.localizedDescription ?: @"未知错误").UTF8String);
+            // 主动退出（例如端口被别的实例占着）不该被下一次启动当成"崩溃重启"，
+            // 所以这里也把运行标记清成干净退出。
+            IAGDaemonHandleTerminationSignal(SIGTERM);
             return 1;
         }
 

@@ -76,6 +76,26 @@ function toast(message, type) {
 var state = {
   token: localStorage.getItem('iag_token') || '',
   health: null,
+  // 守护进程在线状态机：unknown（还没测过/正在测）/ up / down
+  daemon: {
+    status: 'unknown',
+    failCount: 0,
+    failSince: 0,
+    lastProbeAt: 0,
+    lastOkAt: 0,
+    lastError: '',
+    lastPid: null,
+    lastRestarts: null,
+    lastVersion: '',
+    lastStartedAt: null,
+    lastCrashKey: '',
+    lastExitClean: null,
+    offlineNoticeShown: false,
+    pollTimer: null,
+    probing: false,
+    streamStartPid: null,
+    streamStartRestarts: null
+  },
   config: null,
   configOriginal: null,
   sessions: [],
@@ -181,47 +201,356 @@ function switchPage(name) {
 }
 
 /* ==========================================================================
- * 健康检查
+ * 健康检查（守护进程存活检测）
+ *
+ * 参数约定（与守护进程 /api/health 契约一致）：
+ *   pid / startedAt / restarts / lastCrash{at,signal,detail} / lastExitClean
+ *
+ * 轮询策略：
+ *   · 页面可见时每 5 秒探一次；页面隐藏时降到每 15 秒（省电，WKWebView 后台本来也会被限流）。
+ *   · 单次失败不翻脸（守护进程重启的瞬间必然失败一次），连续失败 2 次才判定掉线。
+ *   · 页面从隐藏恢复可见时立刻补测一次。
+ *   · 所有定时器都挂在 state.daemon.pollTimer / visibilityTimer 上，可被 stopHealthPolling 清理。
+ *
+ * 注意：本文件是 ES5 风格，不要用 let/const/箭头函数/模板字符串。
  * ========================================================================== */
 
-function setConn(ok, label) {
-  var dot = $('conn-dot');
-  var text = $('conn-label');
-  if (dot) dot.className = 'conn-dot ' + (ok ? 'ok' : 'bad');
-  if (text) text.textContent = label;
+var HEALTH_INTERVAL_VISIBLE = 5000;     // 可见时的轮询间隔
+var HEALTH_INTERVAL_HIDDEN = 15000;     // 隐藏时的轮询间隔
+var HEALTH_FAIL_THRESHOLD = 2;          // 连续失败几次判定掉线
+var HEALTH_DETAIL_LIMIT = 1400;         // 崩溃日志详情截断长度
+
+var CRASH_LOG_PATH = '/var/mobile/Library/iAgent/logs/iagentd-crash.log';
+
+function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+/* 时:分:秒，用于「最后检测 12:34:56」 */
+function clockTime(ts) {
+  if (!ts) return '—';
+  var d = new Date(ts);
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds());
 }
 
-function checkHealth(silent) {
-  return api('/api/health').then(function (health) {
-    state.health = health;
-    setConn(true, '已连接 · v' + (health.version || '?'));
-    var ver = $('appbar-ver');
-    if (ver) ver.textContent = 'v' + (health.version || '');
-    updateChatBanner();
-    renderDiag();
-    return health;
-  }).catch(function (error) {
-    setConn(false, '未连接');
-    if (!silent) toast('无法连接 daemon：' + (error.message || ''), 'err');
-    updateChatBanner();
-    return null;
-  });
+/* 「3 秒前 / 2 分钟前」 */
+function relTime(fromMs, toMs) {
+  if (!fromMs) return '';
+  var seconds = Math.round(((toMs || Date.now()) - fromMs) / 1000);
+  if (seconds < 0) seconds = 0;
+  if (seconds < 60) return seconds + ' 秒前';
+  if (seconds < 3600) return Math.round(seconds / 60) + ' 分钟前';
+  if (seconds < 86400) return Math.round(seconds / 3600) + ' 小时前';
+  return Math.round(seconds / 86400) + ' 天前';
+}
+
+/* 截断长日志，保留尾部（崩溃原因一般在最后几行） */
+function truncateDetail(text, limit) {
+  var value = String(text == null ? '' : text);
+  var max = limit || HEALTH_DETAIL_LIMIT;
+  if (value.length <= max) return value;
+  return '…（已截断，仅保留最后 ' + max + ' 字符）\n' + value.slice(value.length - max);
+}
+
+/* 供测试注入替身（测试里不能真发网络请求）。 */
+var probeHealthForClose = null;
+/* 测试可覆写成 function (suffix) {} 来断言补进卡片的文案。 */
+var announceDaemonClose = function (summary) { finalizeCloseReport(summary); };
+
+/* 状态：检测中（灰点）。注意不要在这里动 .daemon-offline：
+   掉线期间每 5 秒都会重测一次，如果重测时把降级状态清掉，输入框会一闪一闪。 */
+function setConnChecking() {
+  var dot = $('conn-dot');
+  var text = $('conn-label');
+  if (dot) dot.className = 'conn-dot';
+  if (text) text.textContent = state.daemon.status === 'down'
+    ? '掉线（重试中…）' : '检测中…';
+  var labelNode = $('conn-label-box');
+  if (labelNode) labelNode.title = '正在检测守护进程…（点这里立刻重测）';
+}
+
+/* 一次探测结束后把徽标同步回真实状态。
+   没有这一步的话，探测开始时的「检测中」会一直挂着到下一次轮询。 */
+function syncConnBadge() {
+  if (state.daemon.status === 'down') setConn(false, '掉线');
+  else if (state.daemon.status === 'up') setConn(true, '在线');
+  else setConnChecking();
+}
+
+/* 状态：在线（绿点）/ 掉线（红点），标题里带最后检测时间与版本 */
+function setConn(ok, label) {
+  var daemon = state.daemon;
+  var dot = $('conn-dot');
+  var text = $('conn-label');
+  var version = (state.health && state.health.version) || daemon.lastVersion || '';
+  var when = daemon.lastProbeAt ? clockTime(daemon.lastProbeAt) : '—';
+  var title = (ok ? '守护进程在线' : '守护进程无响应') +
+    '\n最后检测：' + when + '（' + relTime(daemon.lastProbeAt) + '）' +
+    '\n版本：' + (version ? 'v' + version : '未知') +
+    (daemon.lastPid ? '\npid：' + daemon.lastPid : '') +
+    (daemon.lastRestarts != null ? '\n累计重启：' + daemon.lastRestarts + ' 次' : '') +
+    (ok ? '' : '\n最近错误：' + (daemon.lastError || '连接失败')) +
+    '\n点这里立刻重测';
+  var labelNode = $('conn-label-box');
+  if (dot) dot.className = 'conn-dot ' + (ok ? 'ok' : 'bad');
+  // conn-label-box 是包住「圆点 + 文字」的容器：绝不能给它赋 textContent，
+  // 那会把圆点一起清掉（它就消失了）。文字写 conn-label，标题写容器。
+  if (text) text.textContent = label;
+  if (labelNode) labelNode.title = title;
+  else if (text) text.title = title;
+  // 掉线时整页降级（CSS 用来灰掉输入区），不依赖具体元素
+  var app = $('app');
+  if (app) {
+    if (ok) app.classList.remove('daemon-offline');
+    else app.classList.add('daemon-offline');
+  }
+}
+
+/* 从健康快照里摘出我们关心的字段（兼容旧版 daemon：字段缺失一律当未知） */
+function healthSnapshot(health) {
+  health = health || {};
+  var crash = health.lastCrash || null;
+  return {
+    pid: (typeof health.pid === 'number') ? health.pid : null,
+    restarts: (typeof health.restarts === 'number') ? health.restarts : null,
+    version: health.version || '',
+    startedAt: (typeof health.startedAt === 'number') ? health.startedAt : null,
+    crash: crash,
+    crashKey: crash ? String(crash.at || '') + '|' + String(crash.signal || '') : '',
+    exitClean: (health.lastExitClean === true || health.lastExitClean === false) ? health.lastExitClean : null
+  };
+}
+
+/* 「守护进程已重启」信息卡片 —— 用户最想知道的就是它为什么没了 */
+function appendRestartNotice(snapshot) {
+  var text = '守护进程已重启（第 ' + (snapshot.restarts != null ? snapshot.restarts : '?') + ' 次）。' +
+    '上次可能是崩溃或被系统杀掉。' +
+    (snapshot.pid != null ? '（新 pid ' + snapshot.pid + '）' : '');
+  var card = el('div', 'notice info daemon-notice');
+  card.appendChild(el('div', 'notice-title', text));
+
+  if (snapshot.crash) {
+    card.appendChild(el('div', 'notice-line',
+      '崩溃信号：' + (snapshot.crash.signal || '未知') +
+      (snapshot.crash.at ? '（' + clockTime(snapshot.crash.at * 1000) + '）' : '')));
+    var detail = snapshot.crash.detail;
+    if (detail) {
+      var details = el('details', 'notice-details');
+      details.appendChild(el('summary', 'notice-summary', '查看崩溃日志最后几行'));
+      details.appendChild(el('pre', 'notice-pre', truncateDetail(detail)));
+      card.appendChild(details);
+    }
+    card.appendChild(el('div', 'notice-path', '完整日志：' + CRASH_LOG_PATH));
+  } else if (snapshot.exitClean === false) {
+    card.appendChild(el('div', 'notice-line',
+      '上一次没有干净退出（可能是被系统杀掉，例如内存不足），没有留下崩溃信号。'));
+  } else {
+    card.appendChild(el('div', 'notice-line',
+      '上一次没有留下崩溃记录（可能是正常退出后又被拉起，例如重启 SpringBoard 或重装插件）。'));
+  }
+
+  appendToChat(card);
+  return card;
+}
+
+/* 掉线横幅：常驻在聊天页顶部（不是 toast，不会被几秒后吃掉） */
+function daemonOfflineBannerText() {
+  var seconds = state.daemon.failSince
+    ? Math.max(0, Math.round((Date.now() - state.daemon.failSince) / 1000)) : 0;
+  return '守护进程未运行（未响应 /api/health）' +
+    (seconds > 0 ? '，已经 ' + seconds + ' 秒' : '') +
+    '。正在自动重试…如果一直这样，去 Sileo 里确认插件已安装，或重启一次 SpringBoard。' +
+    '（也可以下拉刷新 / 点右上角状态重测）';
 }
 
 function updateChatBanner() {
   var banner = $('chat-banner');
   if (!banner) return;
+  var daemon = state.daemon;
   var health = state.health;
-  var needKey = health && health.model && health.model.hasKey === false;
+  clear(banner);
+  banner.onclick = null;
+  banner.style.cursor = '';
+
+  if (daemon.status === 'down') {
+    banner.appendChild(el('span', 'banner-text', daemonOfflineBannerText()));
+    hide(banner);
+    show(banner);
+    return;
+  }
+
+  var needKey = daemon.status === 'up' && health && health.model && health.model.hasKey === false;
   if (needKey) {
-    clear(banner);
     banner.appendChild(el('span', 'banner-text', '尚未配置模型 API Key，点击前往设置'));
     banner.onclick = function () { switchPage('settings'); };
     banner.style.cursor = 'pointer';
     show(banner);
-  } else {
-    hide(banner);
+    return;
   }
+
+  hide(banner);
+}
+
+function updateModelCheckAvailability() {
+  var showList = $('model-list-btn');
+  var test = $('model-check-btn');
+  if (showList && !showList.getAttribute('data-busy')) showList.disabled = false;
+  if (test && !test.getAttribute('data-busy')) test.disabled = false;
+}
+
+function daemonOffline() { return state.daemon.status === 'down'; }
+
+/* 掉线期间禁止发消息：发送按钮禁用 + 输入框提示，免得又攒出一条「连接被提前关闭」。 */
+function setSendDisabled(offline) {
+  var send = $('chat-send');
+  var input = $('chat-input');
+  if (send) send.disabled = !!(offline || state.streaming);
+  if (input) {
+    input.disabled = !!offline;
+    input.placeholder = offline ? '守护进程未运行，暂时无法发送消息' : '输入消息…';
+  }
+}
+
+function applyDaemonStatus(status) {
+  if (status === 'down') {
+    setConn(false, '掉线');
+    setSendDisabled(true);
+    updateChatBanner();
+    // 掉线期间正在流式输出的消息必须终止，否则会一直空转到看门狗超时
+    if (state.streaming) {
+      var aborted = abortStream();
+      if (!aborted) toast('守护进程已掉线，本次回复已中断', 'err');
+    }
+  } else if (status === 'up') {
+    setConn(true, '在线');
+    setSendDisabled(false);
+    updateChatBanner();
+  } else {
+    setConnChecking();
+  }
+}
+
+function daemonDown() {
+  var daemon = state.daemon;
+  if (!daemon.failSince) daemon.failSince = Date.now();
+  if (!daemon.offlineNoticeShown) {
+    daemon.offlineNoticeShown = true;
+    // 掉线提示用常驻横幅表达，不用 toast；只在「由在线转掉线」时播报一次。
+    toast('守护进程未响应', 'err');
+  }
+}
+
+function healthUp(health) {
+  var daemon = state.daemon;
+  daemon.failCount = 0;
+  daemon.failSince = 0;
+  daemon.lastOkAt = Date.now();
+  daemon.lastError = '';
+  daemon.offlineNoticeShown = false;
+  state.health = health;
+
+  var snapshot = healthSnapshot(health);
+  var previousPid = daemon.lastPid;
+  var previousRestarts = daemon.lastRestarts;
+  // 重启判定：pid 变了（pid 缺失时退化为看 restarts 是否增加）
+  var pidChanged = (previousPid != null && snapshot.pid != null && previousPid !== snapshot.pid);
+  var restartsGrew = (previousRestarts != null && snapshot.restarts != null && snapshot.restarts > previousRestarts);
+  var isRestart = pidChanged || (previousPid == null && restartsGrew);
+
+  daemon.lastPid = snapshot.pid;
+  daemon.lastRestarts = snapshot.restarts;
+  daemon.lastVersion = snapshot.version;
+  daemon.lastStartedAt = snapshot.startedAt;
+  daemon.lastExitClean = snapshot.exitClean;
+  if (snapshot.crashKey) daemon.lastCrashKey = snapshot.crashKey;
+
+  // 先把状态机翻到「在线」，这样随后 appendToChat 触发的滚动/回调里
+  // 不会再看到「掉线」的旧状态。
+  var wasDown = (daemon.status === 'down');
+  daemon.status = 'up';
+  applyDaemonStatus('up');
+
+  if (isRestart) appendRestartNotice(snapshot);
+
+  // 掉线 → 在线：给一张轻量卡片，让用户确认「回来了」
+  if (wasDown) {
+    var back = el('div', 'notice ok daemon-notice');
+    back.appendChild(el('div', 'notice-title',
+      '守护进程已恢复响应' + (snapshot.pid != null ? '（pid ' + snapshot.pid + '）' : '') +
+      '，可以继续发送消息了。'));
+    appendToChat(back);
+  }
+
+  var ver = $('appbar-ver');
+  if (ver) ver.textContent = 'v' + (snapshot.version || '');
+  renderDiag();
+}
+
+function healthDown(error) {
+  var daemon = state.daemon;
+  daemon.failCount += 1;
+  daemon.lastError = (error && error.message) ? error.message : '无法连接';
+  if (daemon.failCount >= HEALTH_FAIL_THRESHOLD && daemon.status !== 'down') {
+    daemon.status = 'down';
+    daemonDown();
+    applyDaemonStatus('down');
+  } else if (daemon.status === 'down') {
+    // 已经判定掉线：只刷新横幅里的「已经 N 秒」，不重复提示
+    updateChatBanner();
+  } else {
+    // 单次抖动不翻脸，但状态徽标要如实显示「正在重试」
+    setConnChecking();
+  }
+}
+
+function probeHealthNow(silent) {
+  var daemon = state.daemon;
+  daemon.probing = true;
+  // 已经判定掉线时保持红点 + 横幅，不要在每次重试时闪回「检测中」
+  if (daemon.status !== 'down') setConnChecking();
+  return api('/api/health').then(function (health) {
+    daemon.probing = false;
+    daemon.lastProbeAt = Date.now();
+    healthUp(health);
+    syncConnBadge();
+    return health;
+  }).catch(function (error) {
+    daemon.probing = false;
+    daemon.lastProbeAt = Date.now();
+    healthDown(error);
+    syncConnBadge();
+    if (!silent) toast('守护进程无响应：' + (error && error.message ? error.message : ''), 'err');
+    return null;
+  });
+}
+
+/* 交互式重测：设置页「刷新状态」、诊断按钮、点状态徽标走这里 */
+function checkHealth(silent) { return probeHealthNow(silent === true); }
+
+/* 单次轮询：走状态机（失败计数 / 重启检测），供定时器和测试调用 */
+function pollHealthOnce() { return probeHealthNow(true); }
+
+function healthPollInterval() {
+  return document.hidden ? HEALTH_INTERVAL_HIDDEN : HEALTH_INTERVAL_VISIBLE;
+}
+
+function startHealthPolling() {
+  var daemon = state.daemon;
+  stopHealthPolling();
+  daemon.pollTimer = setInterval(function () { pollHealthOnce(); }, healthPollInterval());
+}
+
+function stopHealthPolling() {
+  var daemon = state.daemon;
+  if (daemon.pollTimer) { clearInterval(daemon.pollTimer); daemon.pollTimer = null; }
+}
+
+/* 页面隐藏时放慢、恢复可见时立即补测一次并恢复频率 */
+function handleVisibilityChange() {
+  if (document.hidden) {
+    if (state.daemon.pollTimer) startHealthPolling();
+    return;
+  }
+  startHealthPolling();
+  pollHealthOnce();
 }
 
 /* ==========================================================================
@@ -541,8 +870,7 @@ function appendToChat(node) {
 function setStreaming(active) {
   state.streaming = active;
   if (active) show($('chat-stop')); else hide($('chat-stop'));
-  var send = $('chat-send');
-  if (send) send.disabled = active;
+  setSendDisabled(daemonOffline());
 }
 
 function ensureSession() {
@@ -558,6 +886,12 @@ function ensureSession() {
 
 function sendMessage(textOverride) {
   if (state.streaming) return;
+  // 守护进程掉线时直接挡住：再发一条只会再收到一次「连接被提前关闭」
+  if (daemonOffline()) {
+    toast('守护进程未运行，暂时发不了消息', 'err');
+    updateChatBanner();
+    return;
+  }
   var input = $('chat-input');
   var text = (typeof textOverride === 'string' ? textOverride : input.value).trim();
   if (!text) return;
@@ -609,9 +943,153 @@ function appendRetryCard(text, reason) {
   appendToChat(card);
 }
 
+/* 流在没有 done/error 的情况下结束时的补充说明。
+   同步拼一段写进错误卡片，同时异步拉一次 /api/health：
+   如果守护进程真的重启过，就把 pid/restarts/lastCrash 如实带出来；
+   如果它根本没重启，就不能冤枉它 —— 问题在模型连接或本次会话被主动关闭。 */
+function daemonCloseHint() {
+  // 必须用「本次流开始之前」记下的 pid/restarts 做对比：
+  // 定时轮询会在流进行期间更新 state.daemon，如果等到流结束再读就永远比不出重启。
+  var previousPid = state.daemon.streamStartPid;
+  var previousRestarts = state.daemon.streamStartRestarts;
+  var closedAt = Date.now();
+  if (typeof probeHealthForClose === 'function') {
+    // 替身可能返回 Promise（测试注入）；失败不能变成 unhandled rejection
+    settleQuietly(probeHealthForClose(previousPid, previousRestarts, closedAt));
+  } else {
+    fallbackHealthProbe(previousPid, previousRestarts, closedAt);
+  }
+  return ' 正在确认守护进程状态…';
+}
+
+/* 吞掉一个可选 Promise 的失败，避免 unhandled rejection 打断真正的提示 */
+function settleQuietly(result) {
+  if (result && typeof result.catch === 'function') {
+    result.catch(function () { reportCloseFailed(); });
+  }
+}
+
+/* 异步补充失败也不能影响已经呈现的提示卡片 */
+function reportCloseFailed() {
+  try { announceDaemonClose(null); } catch (e) { /* 兜底：文案都拼不出来就只能算了 */ }
+}
+
+/* 异步体检结束：判断是不是「刚重启」，返回给调用方补进错误卡片。
+   fresh：本次探到的健康快照；previous*：流开始之前记住的值。 */
+function finishCloseReport(fresh, previousPid, previousRestarts, closedAt) {
+  if (!fresh) return null;
+  var snapshot = healthSnapshot(fresh);
+  var pidChanged = (previousPid != null && snapshot.pid != null && previousPid !== snapshot.pid);
+  var restartsGrew = (previousRestarts != null && snapshot.restarts != null &&
+    snapshot.restarts > previousRestarts);
+  // 流的生命周期很短：进程启动时间在本次流开始之后，就一定是在流期间重启的
+  var startedDuringStream = false;
+  if (snapshot.startedAt && closedAt) {
+    startedDuringStream = (snapshot.startedAt * 1000) >= (closedAt - 120000);
+  }
+  return {
+    pid: snapshot.pid,
+    restarts: snapshot.restarts,
+    lastPid: previousPid,
+    lastCrash: snapshot.crash,
+    lastExitClean: snapshot.exitClean,
+    recentMs: snapshot.startedAt ? snapshot.startedAt * 1000 : null,
+    justRestarted: pidChanged || restartsGrew || startedDuringStream
+  };
+}
+
+/* 生产环境兜底：直接拉一次 /api/health（带超时） */
+function fallbackHealthProbe(previousPid, previousRestarts, closedAt) {
+  var announce = makeCloseAnnouncer();
+  var controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var timeout = setTimeout(function () {
+    if (controller) { try { controller.abort(); } catch (e) {} }
+    announce(null);
+  }, 4000);
+  apiFetch('/api/health', { signal: controller ? controller.signal : undefined })
+    .then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.text();
+    })
+    .then(function (text) {
+      clearTimeout(timeout);
+      var health = null;
+      try { health = JSON.parse(text); } catch (e) { health = null; }
+      announce(finishCloseReport(health, previousPid, previousRestarts, closedAt));
+    })
+    .catch(function () {
+      clearTimeout(timeout);
+      announce(null);
+    });
+}
+
+/* 把「连接提前关闭」的原因补进最后一张错误卡片（尽量不打断用户阅读）。 */
+function finalizeCloseReport(summary) {
+  var cards = document.querySelectorAll('#chat-list .notice.err');
+  var card = cards && cards.length ? cards[cards.length - 1] : null;
+  var prefix = ' 正在确认守护进程状态…';
+  var text = daemonCloseSuffix(summary);
+  if (!card) { appendToChat(el('div', 'notice err', text.replace(/^\s+/, ''))); return; }
+  var span = card.firstChild;
+  if (span && span.textContent && span.textContent.indexOf(prefix) >= 0) {
+    span.textContent = span.textContent.replace(prefix, text);
+  } else {
+    card.appendChild(el('div', 'notice-line', text.replace(/^\s+/, '')));
+  }
+  scrollChatToBottom();
+}
+
+/* 一次「确认守护进程状态」只允许补一次说明：无论超时先到还是响应先到 */
+function makeCloseAnnouncer() {
+  var announced = false;
+  return function (summary) {
+    if (announced) return;
+    announced = true;
+    announceDaemonClose(summary);
+  };
+}
+
+/* summary 为 null 表示健康检查也没连上（守护进程大概真的没了） */
+function daemonCloseSuffix(summary) {
+  if (!summary) {
+    return ' 守护进程现在也没有响应 /api/health，基本可以确定它挂掉或被系统杀掉了。' +
+      '恢复后会显示「守护进程已重启」，上面会带上崩溃信号与日志路径。';
+  }
+
+  var now = Date.now();
+  var pidText = summary.pid != null ? ('pid ' + summary.pid) : 'pid 未知';
+
+  if (summary.justRestarted) {
+    var text = ' 守护进程刚刚重启过（第 ' + (summary.restarts != null ? summary.restarts : '?') + ' 次）';
+    if (summary.lastPid != null && summary.pid != null && summary.lastPid !== summary.pid) {
+      text += '，pid 从 ' + summary.lastPid + ' 变成了 ' + summary.pid;
+    }
+    if (summary.recentMs != null) text += '，就在 ' + relTime(now - summary.recentMs, now);
+    if (summary.lastCrash) {
+      text += '，崩溃信号 ' + (summary.lastCrash.signal || '未知') +
+        (summary.lastCrash.at ? '（' + clockTime(summary.lastCrash.at * 1000) + '）' : '');
+      text += ' — 详见 ' + CRASH_LOG_PATH + '（设置 → 诊断 → 查看日志也能看）';
+      if (summary.lastCrash.detail) {
+        text += '。日志最后几行：' + truncateDetail(summary.lastCrash.detail, 240);
+      }
+    } else if (summary.lastExitClean === false) {
+      text += '，上一次没有干净退出（可能是被系统杀掉，例如内存不足）';
+    }
+    return text + '。本次回复已中断。';
+  }
+
+  return ' 守护进程仍在运行（' + pidText +
+    (summary.restarts != null ? '，累计重启 ' + summary.restarts + ' 次' : '') +
+    '）：是模型连接中断，或守护进程主动关闭了本次会话。' +
+    '可以点「重试」再发一次，或先到设置里点「测试模型」确认模型端点是否可用。';
+}
+
 function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
   var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   state.streamAbort = controller;
+  // 记下本次流开始时的守护进程身份，流结束时用来判断「它是不是中途重启过」
+  state.daemon.streamStartPid = state.daemon.lastPid;
+  state.daemon.streamStartRestarts = state.daemon.lastRestarts;
 
   // ⚠️ 这些必须在 .then/.catch 之外定义：下面的错误分支也要用它们。
   // 之前它们写在 .then 回调内部，于是任何错误都会先抛
@@ -664,7 +1142,9 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
     var pendingText = '';
     var lastActivity = Date.now();   // 任何字节到达都算活跃（含心跳注释）
     var firstOutput = false;
-    var sawDone = false;
+    var sawDone = false;             // 收到 done 事件 = 正常收尾
+    var sawError = false;            // 收到 error 事件 = 守护进程正常返回了错误，也算正常收尾
+    var sawAnyEvent = false;         // 收到过任何业务事件（含 0.5 字节的 delta）
 
     // 守护进程每 10 秒发一次心跳，所以"45 秒一个字节都没有"只可能是连接死了
     // （iagentd 崩溃/被杀/被挂起）。这种情况以前会默默停住什么都不显示，现在必须报错。
@@ -748,6 +1228,7 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
         loadSessions(true);
       } else if (eventName === 'error') {
         firstOutput = true;
+        sawError = true;   // 守护进程正常返回了错误并收尾，不要再报「连接被提前关闭」
         appendRetryCard(message, (payload.message || '模型返回错误') + '');
         stopStreaming();
       }
@@ -755,6 +1236,7 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
 
     function markOutput() {
       lastActivity = Date.now();
+      sawAnyEvent = true;
       if (!firstOutput) { firstOutput = true; clearWaiting(); }
     }
 
@@ -765,11 +1247,17 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
           if (pendingRender) { clearTimeout(pendingRender); pendingRender = null; }
           assistantText.textContent = content;
           stopStreaming();
-          // 流结束了却没有 done 事件 = daemon 半路没了。以前这里什么都不显示。
-          if (!sawDone && !finished) {
+          // 流结束了却没有 done / error 事件 = daemon 半路没了，或者模型连接被中断。
+          // ⚠️ 如果收到过 error 事件（例如守护进程正常返回「HTTP 401 API Key 无效」），
+          // 流的结束就是正常收尾，绝不能再叠加一条「守护进程可能崩溃」的吓人提示。
+          if (!sawDone && !sawError && !sawAnyEvent && !finished) {
             finished = true;
-            appendRetryCard(message, '连接被提前关闭：没有收到结束标记（daemon 可能崩溃/被杀，' +
-              '或模型连接中断）。内容可能不完整。');
+            appendRetryCard(message, '连接被提前关闭：守护进程没有返回结束标记，也没有返回任何内容' +
+              '（可能刚启动就被杀掉，或模型接口不可用）。内容可能不完整。' + daemonCloseHint());
+          } else if (!sawDone && !sawError && !finished) {
+            finished = true;
+            appendRetryCard(message, '连接被提前关闭：没有收到结束标记，内容可能不完整。' +
+              daemonCloseHint());
           }
           return;
         }
@@ -815,6 +1303,7 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
   });
 }
 
+/* 返回 true 表示本次确实中断了一条正在输出的流（调用方据此决定要不要提示用户） */
 function abortStream() {
   if (state.streamAbort && !state.abortRequested) {
     state.abortRequested = true;
@@ -822,7 +1311,9 @@ function abortStream() {
       api('/api/abort', { method: 'POST', body: { sessionId: state.sessionId } }).catch(function () {});
     }
     try { state.streamAbort.abort(); } catch (e) { /* ignore */ }
+    return true;
   }
+  return false;
 }
 
 function loadSessionMessages(sessionId) {
@@ -1729,6 +2220,210 @@ function clearApiKey() {
   });
 }
 
+/* ==========================================================================
+ * 模型检测（设置页「测试模型」/「拉取模型列表」）
+ *
+ * 契约：
+ *   POST /api/model/check  body: {baseUrl?, apiKey?, model?}（缺省用 daemon 当前配置）
+ *                          永远 HTTP 200，返回 {ok, verdict, hint, models, steps[]}
+ *   GET  /api/models       返回 {ok, models[], error}
+ * 两个接口都请求「表单里当前填写的值」，用户不必先保存就能验证。
+ * ========================================================================== */
+
+function setButtonBusy(button, busy, busyText, idleText) {
+  if (!button) return;
+  button.disabled = !!busy;
+  button.textContent = busy ? busyText : idleText;
+  if (busy) button.setAttribute('data-busy', '1');
+  else button.removeAttribute('data-busy');
+}
+
+/* 收集要发给 /api/model/check 的覆盖值。
+   API Key 留空 = 不发送该字段（表示「沿用 daemon 已保存的 Key」）。 */
+function collectModelProbe() {
+  var body = {};
+  var baseUrl = $('set-baseUrl');
+  var model = $('set-model');
+  var apiKey = $('set-apiKey');
+  if (baseUrl && baseUrl.value.trim() !== '') body.baseUrl = baseUrl.value.trim();
+  if (model && model.value.trim() !== '') body.model = model.value.trim();
+  if (apiKey && apiKey.value.trim() !== '') body.apiKey = apiKey.value.trim();
+  return body;
+}
+
+/* 「名称 (信号)」里出现的步骤名——unknown(step) 是约定俗成的提示键，不需要特殊处理。 */
+function renderModelCheck(report) {
+  var host = $('model-check-result');
+  if (!host) return;
+  clear(host);
+  report = report || {};
+
+  var verdictText = report.verdict || (report.ok ? '模型可用' : '模型不可用');
+  var head = el('div', 'model-check-head');
+  head.appendChild(el('div', 'model-verdict ' + (report.ok ? 'ok' : 'bad'), verdictText));
+  if (report.hint) head.appendChild(el('div', 'model-hint', report.hint));
+  host.appendChild(head);
+
+  var steps = report.steps || [];
+  var list = el('div', 'model-steps');
+  steps.forEach(function (step) {
+    step = step || {};
+    var ok = step.ok === true;
+    var executed = (step.detail && String(step.detail).indexOf('未执行') === 0) ? false : true;
+    var row = el('div', 'model-step ' + (ok ? 'ok' : (executed ? 'fail' : 'skip')));
+    row.appendChild(el('span', 'model-step-mark', ok ? '✓' : (executed ? '✗' : '○')));
+    var body = el('div', 'model-step-body');
+    var title = el('div', 'model-step-name', step.name || '（未命名步骤）');
+    if (step.ms != null) title.appendChild(el('span', 'model-step-ms', fmtDuration(step.ms)));
+    body.appendChild(title);
+    if (step.detail) body.appendChild(el('div', 'model-step-detail', String(step.detail)));
+    row.appendChild(body);
+    list.appendChild(row);
+  });
+  host.appendChild(list);
+
+  // 用户自定义中转端点最常见的问题：返回 200 但没有 SSE 数据。
+  // 只在确实相关时才提示，避免刷屏。
+  var haystack = verdictText + ' ' + (report.hint || '') + ' ';
+  for (var i = 0; i < steps.length; i++) {
+    if (steps[i] && steps[i].detail) haystack += steps[i].detail + ' ';
+  }
+  if (/SSE|流式/.test(haystack) && !report.ok) {
+    var warn = el('div', 'notice-warn model-sse-warn');
+    warn.appendChild(el('div', 'notice-line',
+      '端点返回了 HTTP 200，但流式对话没有收到 SSE 数据（可能不支持 stream:true）。' +
+      '常见的自建中转/反代（nginx、Cloudflare、部分一体机面板）会缓冲或吃掉 text/event-stream，' +
+      '可以在反向代理里关掉缓冲（proxy_buffering off），或换用支持流式的端点。'));
+    host.appendChild(warn);
+  }
+
+  if (report.models && report.models.length) {
+    host.appendChild(el('div', 'model-models-title', '端点报告的可用模型（' + report.models.length + ' 个）'));
+    host.appendChild(renderModelIdList(report.models));
+  }
+}
+
+/* 模型 id 列表：点一下填进模型名输入框，省得手打 */
+function renderModelIdList(models, fromServer) {
+  var wrap = el('div', 'model-ids');
+  var current = $('set-model');
+  var currentValue = current ? current.value.trim() : '';
+  models.forEach(function (id) {
+    if (typeof id !== 'string' || !id) return;
+    var chip = el('button', 'model-id' + (id === currentValue ? ' current' : ''), id);
+    chip.type = 'button';
+    chip.onclick = function () {
+      var input = $('set-model');
+      if (!input) return;
+      input.value = id;
+      var siblings = wrap.children;
+      for (var i = 0; i < siblings.length; i++) siblings[i].classList.remove('current');
+      chip.classList.add('current');
+      toast('已填入模型名：' + id, 'ok');
+    };
+    wrap.appendChild(chip);
+  });
+  if (!wrap.children.length) wrap.appendChild(el('div', 'empty', '（没有可用的模型 id）'));
+  if (fromServer) {
+    var hint = el('div', 'model-ids-hint',
+      '点某个 id 会填入上面的「模型名」输入框，记得再点一次「保存设置」。');
+    var box = el('div');
+    box.appendChild(wrap);
+    box.appendChild(hint);
+    return box;
+  }
+  return wrap;
+}
+
+function runModelCheck() {
+  var button = $('model-check-btn');
+  var host = $('model-check-result');
+  if (button && button.getAttribute('data-busy')) return Promise.resolve(null);
+
+  setButtonBusy(button, true, '检测中…', '测试模型');
+  if (host) {
+    clear(host);
+    host.appendChild(el('div', 'empty', '正在检测：配置 → 网络 → 鉴权 → 模型列表 → 流式对话…'));
+  }
+
+  return api('/api/model/check', { method: 'POST', body: collectModelProbe() })
+    .then(function (report) {
+      renderModelCheck(report);
+      if (report && report.ok) toast('模型可用', 'ok');
+      else if (report && report.verdict) toast(report.verdict, 'err');
+      return report;
+    })
+    .catch(function (error) {
+      renderModelCheck({
+        ok: false,
+        verdict: '检测失败：' + ((error && error.message) || '未知错误'),
+        hint: '守护进程可能没在运行，或该版本的 daemon 还没有实现 /api/model/check。' +
+          '可以先点右上角状态徽标确认守护进程是否在线。',
+        steps: [{ name: '请求 /api/model/check', ok: false, detail: (error && error.message) || '', ms: 0 }]
+      });
+      return null;
+    })
+    .then(function (result) {
+      setButtonBusy(button, false, '检测中…', '测试模型');
+      updateModelCheckAvailability();
+      return result;
+    });
+}
+
+function loadModelList() {
+  var button = $('model-list-btn');
+  var host = $('model-list');
+  if (button && button.getAttribute('data-busy')) return Promise.resolve(null);
+
+  setButtonBusy(button, true, '拉取中…', '拉取模型列表');
+  if (host) {
+    clear(host);
+    host.appendChild(el('div', 'empty', '正在请求 /api/models…'));
+  }
+
+  return api('/api/models')
+    .then(function (payload) {
+      var models = (payload && payload.models) || [];
+      if (host) {
+        clear(host);
+        if (payload && payload.error && !models.length) {
+          host.appendChild(el('div', 'empty', '端点没有返回模型列表：' + payload.error));
+        } else if (!models.length) {
+          host.appendChild(el('div', 'empty', '端点没有返回任何模型 id。'));
+        } else {
+          host.appendChild(renderModelIdList(models, true));
+        }
+      }
+      return models;
+    })
+    .catch(function (error) {
+      var message = (error && error.message) || '未知错误';
+      // 注意：404 时 apiErrorFrom 给的是「未知接口 GET /api/models」这种文案，
+      // 里面并不含 "HTTP 404"，所以必须同时看 error.status，否则友好提示永远不触发。
+      var status = (error && error.status) || 0;
+      var notImplemented = status === 404 || status === 501 || status === 405 ||
+        /HTTP (404|501|405)/.test(message);
+      var friendly = notImplemented
+        ? '守护进程还没实现 /api/models' + (status ? '（HTTP ' + status + '）' : '') + '。' +
+          '可以直接手填模型名；或改用「测试模型」，它会顺便列出端点报告的模型。'
+        : '拉取模型列表失败：' + message;
+      if (host) {
+        clear(host);
+        host.appendChild(el('div', 'empty', friendly));
+      }
+      toast(friendly, 'err');
+      return null;
+    })
+    .then(function (result) {
+      setButtonBusy(button, false, '拉取中…', '拉取模型列表');
+      updateModelCheckAvailability();
+      return result;
+    });
+}
+
+/* 拉取结果要一直留在页面上（用户可能边看边改输入框），
+   所以这里不主动清空，只保证按钮状态和可用性同步。 */
+
 function renderDiag() {
   var host = $('diag-grid');
   if (!host) return;
@@ -1739,7 +2434,20 @@ function renderDiag() {
   var device = health.device || {};
   var model = health.model || {};
   var bridge = health.bridge || {};
+  var daemon = state.daemon;
+  var crash = health.lastCrash || null;
+  var daemonLabel = daemon.status === 'up' ? '在线' : (daemon.status === 'down' ? '掉线' : '检测中');
   var pairs = [
+    ['守护进程', daemonLabel + (daemon.status === 'down' && daemon.failSince
+      ? '（已掉线 ' + Math.max(0, Math.round((Date.now() - daemon.failSince) / 1000)) + ' 秒）' : '')],
+    ['Process ID', health.pid != null ? String(health.pid) : '—'],
+    ['累计重启', health.restarts != null ? String(health.restarts) + ' 次' : '（旧版 daemon 未上报）'],
+    ['启动时间', health.startedAt ? fmtTime(health.startedAt) : '—'],
+    ['上次退出', health.lastExitClean === true ? '干净退出'
+      : (health.lastExitClean === false ? '非正常退出（可能被系统杀掉）' : '—')],
+    ['上次崩溃', crash ? (String(crash.signal || '未知信号') + (crash.at ? ' · ' + fmtTime(crash.at) : ''))
+      : '无记录'],
+    ['最后检测', daemon.lastProbeAt ? (clockTime(daemon.lastProbeAt) + '（' + relTime(daemon.lastProbeAt) + '）') : '—'],
     ['版本', health.version || '—'],
     ['运行时长', (health.uptimeSec != null ? Math.round(health.uptimeSec) + ' 秒' : '—')],
     ['设备', (device.model || '—') + ' · iOS ' + (device.systemVersion || '?')],
@@ -1758,6 +2466,16 @@ function renderDiag() {
     host.appendChild(el('div', 'diag-key', pair[0]));
     host.appendChild(el('div', 'diag-val', pair[1]));
   });
+
+  // 崩溃详情单独一块：可折叠，不占满整个诊断网格
+  if (crash && crash.detail) {
+    var details = el('details', 'notice-details diag-crash');
+    details.appendChild(el('summary', 'notice-summary', '上次崩溃日志（最后几行）'));
+    details.appendChild(el('pre', 'notice-pre', truncateDetail(crash.detail)));
+    host.appendChild(details);
+    host.appendChild(el('div', 'diag-key', '崩溃日志路径'));
+    host.appendChild(el('div', 'diag-val', CRASH_LOG_PATH));
+  }
 }
 
 function openLogs() {
@@ -1868,6 +2586,8 @@ function bindEvents() {
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) stopTerminalPolling();
     else if (state.activePage === 'term') startTerminalPolling();
+    // 守护进程存活检测：隐藏时降频，恢复可见时立刻补测一次
+    handleVisibilityChange();
   });
 
   // 工具
@@ -1889,6 +2609,20 @@ function bindEvents() {
   $('diag-refresh').onclick = function () { checkHealth(); };
   $('diag-logs').onclick = openLogs;
   $('logs-refresh').onclick = loadLogs;
+
+  // 模型检测
+  if ($('model-check-btn')) $('model-check-btn').onclick = function () { runModelCheck(); };
+  if ($('model-list-btn')) $('model-list-btn').onclick = function () { loadModelList(); };
+
+  // 顶部状态徽标：点一下立刻重测守护进程
+  var connBox = $('conn-label-box');
+  if (connBox) {
+    connBox.onclick = function () {
+      probeHealthNow(true);
+      toast('正在重新检测守护进程…');
+    };
+    connBox.style.cursor = 'pointer';
+  }
 
   var closers = document.querySelectorAll('[data-close]');
   for (var c = 0; c < closers.length; c++) {
@@ -1925,8 +2659,9 @@ function boot() {
   state.term.emulator = new TerminalEmulator();
   switchPage('chat');
 
-  checkHealth(true);
-  setInterval(function () { checkHealth(true); }, 15000);
+  // 守护进程存活检测：立即测一次，然后按 5s/15s 轮询（见 startHealthPolling）
+  probeHealthNow(true);
+  startHealthPolling();
 
   loadSessions(true).then(function () {
     if (state.sessionId) return loadSessionMessages(state.sessionId);

@@ -9,6 +9,7 @@
 #import "IAGAgent.h"
 #import "IAGBridge.h"
 #import "IAGLLM.h"
+#import "IAGModelCheck.h"
 #import "IAGPaths.h"
 #import "IAGProcess.h"
 #import "IAGScheduler.h"
@@ -19,6 +20,7 @@
 #import "IAGLog.h"
 #import "IAGUtil.h"
 #import "IAGVersion.h"
+#import "IAGDiagnostics.h"
 
 static NSString *IAGContentTypeForExtension(NSString *extension)
 {
@@ -167,6 +169,13 @@ static NSString *IAGContentTypeForExtension(NSString *extension)
     NSString *path = request.path;
     NSString *method = request.method;
 
+    // 服务端 handler 用 __weak self 捕获（避免 IAGHTTPServer ↔ IAGDaemon 循环引用）。
+    // 万一 self 已经释放，这里必须自己给出响应，否则客户端会看到一个没有 body 的 200。
+    if (self == nil) {
+        [response setError:@"守护进程正在关闭" status:503];
+        return;
+    }
+
     if (![path hasPrefix:@"/api/"]) {
         [self serveStatic:request response:response];
         return;
@@ -181,6 +190,7 @@ static NSString *IAGContentTypeForExtension(NSString *extension)
     @try {
         if ([self routeHealth:request response:response path:path method:method]) return;
         if ([self routeConfig:request response:response path:path method:method]) return;
+        if ([self routeModels:request response:response path:path method:method]) return;
         if ([self routeSessions:request response:response path:path method:method]) return;
         if ([self routeChat:request response:response stream:stream path:path method:method]) return;
         if ([self routeTools:request response:response path:path method:method]) return;
@@ -228,12 +238,22 @@ static NSString *IAGContentTypeForExtension(NSString *extension)
         @"bootUUID": IAGBootUUID(),
     };
 
+    // 存活/重启信息：前端可以据此提示"守护进程刚刚重启过"。
+    // 键名固定为 pid / startedAt / restarts / lastCrash / lastExitClean
+    // （由 IAGDiagnostics 提供，见 shared/IAGDiagnostics.h）。
+    NSDictionary *diagnostics = IAGDaemonHealthInfo();
+
     [response setJSON:@{
         @"ok": @YES,
         @"version": IAG_VERSION_STRING,
         @"build": IAG_BUILD_STRING,
         @"uptimeSec": @((NSInteger)([NSDate date].timeIntervalSince1970 - _startedAt)),
         @"processUptime": IAGProcessUptime(),
+        @"pid": diagnostics[@"pid"],
+        @"startedAt": diagnostics[@"startedAt"],
+        @"restarts": diagnostics[@"restarts"],
+        @"lastCrash": diagnostics[@"lastCrash"],
+        @"lastExitClean": diagnostics[@"lastExitClean"],
         @"jbRoot": IAGJailbreakRoot(),
         @"rootfs": IAGRootfs(),
         @"rootless": @(IAGIsRootless()),
@@ -297,6 +317,94 @@ static NSString *IAGContentTypeForExtension(NSString *extension)
 
     [response setError:@"仅支持 GET/POST" status:405];
     return YES;
+}
+
+#pragma mark - /api/models 与 /api/model/check
+
+- (BOOL)routeModels:(IAGHTTPRequest *)request response:(IAGHTTPResponse *)response
+               path:(NSString *)path method:(NSString *)method
+{
+    // 只接管 /api/models 与 /api/model/check 这两个精确路径：
+    // 其它 /api/model* 前缀（例如手滑写成 /api/model/checks）交给后面的路由去报 404，
+    // 免得这里的"未知接口"抢了别人的诊断信息。
+    if (![path isEqualToString:@"/api/models"] && ![path isEqualToString:@"/api/model/check"]) {
+        return NO;
+    }
+
+    // GET /api/models：把远端 /models 的结果直接给前端做下拉选择。
+    if ([path isEqualToString:@"/api/models"]) {
+        if (![method isEqualToString:@"GET"]) {
+            [response setError:@"仅支持 GET" status:405];
+            return YES;
+        }
+
+        IAGConfig *config = [IAGConfig shared];
+        NSInteger statusCode = 0;
+        NSError *error = nil;
+        NSArray<NSString *> *models = nil;
+        @try {
+            models = [IAGLLM fetchModelIdentifiersWithBaseURL:[config baseURL]
+                                                       apiKey:[config apiKey]
+                                                   statusCode:&statusCode
+                                                        error:&error];
+        } @catch (NSException *exception) {
+            error = [NSError errorWithDomain:@"iagent.llm" code:-1
+                                    userInfo:@{ NSLocalizedDescriptionKey:
+                                        [NSString stringWithFormat:@"获取模型列表异常: %@",
+                                         exception.reason ?: @"未知"] }];
+        }
+
+        if (!models) {
+            NSString *reason = error.localizedDescription ?: @"获取模型列表失败";
+            IAGLogError(@"GET /api/models 失败: %@", reason);
+            [response setJSON:@{ @"ok": @NO, @"models": @[], @"error": reason ?: @"" }];
+            return YES;
+        }
+        [response setJSON:@{ @"ok": @YES, @"models": models, @"error": [NSNull null] }];
+        return YES;
+    }
+
+    // POST /api/model/check：分步体检。**无论成功失败都返回 HTTP 200**，body 结构固定，
+    // 因为它是"体检报告"而不是"接口调用结果"。
+    if ([path isEqualToString:@"/api/model/check"]) {
+        if (![method isEqualToString:@"POST"]) {
+            [response setError:@"仅支持 POST" status:405];
+            return YES;
+        }
+
+        NSDictionary *body = [request jsonBody];
+        NSDictionary *overrides = nil;
+        if ([body isKindOfClass:[NSDictionary class]] && body.count > 0) {
+            // 只接受这三个键，其余忽略（避免前端误传把临时配置搞脏）。
+            NSMutableDictionary *filtered = [NSMutableDictionary dictionary];
+            for (NSString *key in @[ kIAGKeyBaseURL, kIAGKeyAPIKey, kIAGKeyModel ]) {
+                id value = body[key];
+                if ([value isKindOfClass:[NSString class]] && [value length] > 0) filtered[key] = value;
+            }
+            if (filtered.count) overrides = filtered;
+        }
+
+        NSDictionary *report = nil;
+        @try {
+            report = [IAGModelCheck runWithConfig:[IAGConfig shared] overrides:overrides];
+        } @catch (NSException *exception) {
+            IAGLogError(@"模型体检异常: %@", exception.reason ?: @"未知");
+            report = @{
+                @"ok": @NO,
+                @"verdict": [NSString stringWithFormat:@"不可用：体检过程异常（%@）",
+                             exception.reason ?: @"未知"],
+                @"hint": @"查看 logs/iagent.log 里的「模型体检」相关日志",
+                @"steps": @[],
+                @"models": @[],
+            };
+        }
+
+        [response setJSON:report ?: @{ @"ok": @NO, @"verdict": @"不可用：未知错误",
+                                       @"hint": @"", @"steps": @[], @"models": @[] }];
+        return YES;
+    }
+
+    return NO;
 }
 
 #pragma mark - /api/sessions
@@ -465,9 +573,34 @@ static NSString *IAGContentTypeForExtension(NSString *extension)
 
     [stream sendEvent:@"session" data:@{ @"sessionId": sessionId }];
 
+    // 事件流的收尾保证：**任何一次 /api/chat 的 SSE 流都必须恰好以一个 done 事件结束**。
+    // 预检失败（会话不存在、没配 API Key）等路径只发 error 就 return，前端会看到
+    // "收到 error 然后连接被关闭"，从而再叠加一条"连接被提前关闭（daemon 可能被杀/
+    // 崩溃）"的误导提示——用户以为守护进程崩了。这里兜底补一个 done。
+    __block BOOL sawDone = NO;
+    __block BOOL sawError = NO;
+    void (^emitTerminalDone)(void) = ^{
+        if (sawDone || !stream.open) return;
+        sawDone = YES;
+        [stream sendEvent:@"done" data:@{
+            @"sessionId": sessionId,
+            @"steps": @0,
+            @"partial": @YES,
+            @"reason": sawError ? @"error" : @"unknown",
+        }];
+    };
+
     [[IAGAgent shared] runSession:sessionId message:message eventHandler:^(NSString *event, NSDictionary *payload) {
+        // 客户端断开后不要继续往坏掉的 socket 写：stream.open 变 NO 就停止推送，
+        // 让 agent 循环尽快跑完（它自己会在每步检查 isAborted）。
+        if (!stream.open) return;
+        if ([event isEqualToString:@"done"]) sawDone = YES;
+        if ([event isEqualToString:@"error"]) sawError = YES;
         [stream sendEvent:event data:payload];
     }];
+
+    // 走到这里说明 agent 循环结束了：没发过 done 就补一个（正常路径下 IAGAgent 已发）。
+    emitTerminalDone();
 
     dispatch_source_cancel(heartbeat);
     [stream end];

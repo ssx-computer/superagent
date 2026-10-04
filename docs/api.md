@@ -106,9 +106,11 @@ Web UI 地址：`http://127.0.0.1:<port>/`（启动日志里也会打印）。
 
 | 方法 | 路径 | 用途 | 需要 token |
 | --- | --- | --- | --- |
-| GET | `/api/health` | 存活探针 + 环境/统计快照 | 否 |
+| GET | `/api/health` | 存活探针 + 环境/统计快照 + 存活/重启信息 | 否 |
 | GET | `/api/config` | 读取配置（`apiKey` 掩码） | 是 |
 | POST | `/api/config` | 局部更新配置，返回改动键名 | 是 |
+| GET | `/api/models` | 拉取远端的模型 id 列表（下拉选择用） | 是 |
+| POST | `/api/model/check` | 模型分步体检（配置/连通/鉴权/列表/流式） | 是 |
 | GET | `/api/sessions` | 会话列表（按 `updatedAt` 倒序） | 是 |
 | POST | `/api/sessions` | 新建会话 | 是 |
 | GET | `/api/sessions/<id>` | 会话详情，含全部消息 | 是 |
@@ -156,6 +158,15 @@ Web UI 地址：`http://127.0.0.1:<port>/`（启动日志里也会打印）。
   "build": "1",
   "uptimeSec": 18342,
   "processUptime": "05:05:42",
+  "pid": 4213,
+  "startedAt": 1717025250,
+  "restarts": 1,
+  "lastCrash": {
+    "at": 1717025100,
+    "signal": "SIGSEGV",
+    "detail": "===== 2024-05-30 12:04:33 收到 SIGSEGV(11)，pid=4188 =====\n调用栈:\n  #0  ..."
+  },
+  "lastExitClean": false,
   "jbRoot": "/var/jb",
   "rootfs": "/",
   "rootless": true,
@@ -205,7 +216,19 @@ Web UI 地址：`http://127.0.0.1:<port>/`（启动日志里也会打印）。
 }
 ```
 
-注意：`tools` 里的每一项只有 `name` / `description` / `dangerous` / `enabled` 四个键（没有 `category` 和 `parameters`，那是 `/api/tools` 才有的）。`freeDisk` 为 `-1` 表示未知。`bridge` 内容见 [3.14](#314-桥接-apibridge)。
+注意：`tools` 里的每一项只有 `name` / `description` / `dangerous` / `enabled` 四个键（没有 `category` 和 `parameters`，那是 `/api/tools` 才有的）。`freeDisk` 为 `-1` 表示未知。`bridge` 内容见 [3.16](#316-桥接-apibridge)。
+
+存活/重启相关字段（1.1.0 新增，供前端实时检测"守护进程是不是刚重启过"）：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `pid` | number | 当前守护进程 pid |
+| `startedAt` | number | 本次进程启动的 unix 秒 |
+| `restarts` | number | 累计"非正常退出"次数（持久化在 `logs/restarts.count`，正常停止不计数） |
+| `lastCrash` | object / null | 上一次非正常退出的现场；对象含 `at`(unix 秒)、`signal`(`"SIGSEGV"` 等或 `null`)、`detail`(崩溃日志新增部分的最后几行，截断)；没有记录时为 `null` |
+| `lastExitClean` | boolean | 上一次是否干净退出（SIGTERM/SIGINT/SIGHUP 清理过运行标记即为干净）；进程首次启动时为 `true` |
+
+崩溃/重启的判定依据是 `logs/running.marker`（进程启动时写入 pid/时间，收到终止信号时改写成 `"clean":1`）。崩溃日志在 `logs/iagentd-crash.log`（未捕获异常 + `SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/SIGTRAP` 的信号名与 `backtrace`）。LaunchDaemon 的 `KeepAlive` 已改为无条件重启（`<true/>`），配合 `ThrottleInterval` 5 秒。
 
 ### 3.2 `GET /api/config`
 
@@ -311,7 +334,79 @@ curl -s -X POST http://127.0.0.1:8080/api/config \
 }
 ```
 
-### 3.4 `GET /api/sessions`
+### 3.4 `GET /api/models`
+
+- 方法：仅 `GET`，其它 → 405 `{"error":"仅支持 GET"}`。
+- 请求：无参数。用当前配置里的 `baseUrl` / `apiKey` 请求远端的 `GET <baseUrl>/models`。
+- 成功 200：`{ "ok": true, "models": ["gpt-4o", "gpt-4o-mini", …], "error": null }`
+- 失败 200（**仍然是 200**，错误放在 `error` 里）：`{ "ok": false, "models": [], "error": "HTTP 401 {\"error\":…}" }`
+- `models` 数组是模型 id 的字符串列表（顺序与远端一致，已去重）。
+
+```bash
+curl -s "$BASE/api/models" -H "X-IAG-Token: $TOKEN"
+```
+
+### 3.5 `POST /api/model/check`
+
+- 方法：仅 `POST`，其它 → 405。**无论成功失败都返回 HTTP 200**，因为它是"体检报告"。
+- 请求体：可空 `{}`，或带覆盖值 `{"baseUrl":"…","apiKey":"…","model":"…"}`（三者都可缺省，缺省用当前配置；覆盖值**只存在于本次请求内，不写盘**）。
+- 会真实发起网络请求：`GET <baseUrl>/models`，以及一个 `max_tokens=1`、`stream=true`、`messages=[{"role":"user","content":"hi"}]` 的流式对话。
+- 步骤**顺序固定 5 项**，某项失败后后续步骤 `ok:false` 且 `detail` 为 `"未执行（上一步失败）"`。
+
+| 步骤名 | 做了什么 | 失败时的典型 detail |
+| --- | --- | --- |
+| `配置检查` | `baseUrl` / `model` / `apiKey` 是否都非空 | `缺少 apiKey；baseUrl=… model=… key=未设置` |
+| `网络连通` | 与 `/models` 请求共用一次往返，按错误类型区分"连不上" | `无法连接 api.example.com (NSURLErrorDomain -1004 无法连接到服务器)` |
+| `接口鉴权` | `/models` 是否 2xx | `HTTP 401 {"error":"invalid key"}` |
+| `模型列表` | 解析 `data[].id`，判断配置的 `model` 是否在其中 | `发现 42 个模型，但没有 gpt-4o` |
+| `流式对话` | 真实流式请求，验证至少收到一个 SSE delta | `端点返回 200 但没有 SSE 数据（可能不支持流式）` |
+
+响应 200：
+
+```json
+{
+  "ok": true,
+  "verdict": "可用：gpt-4o 流式对话正常",
+  "hint": "",
+  "steps": [
+    {"name":"配置检查","ok":true,"detail":"baseUrl=https://x/v1  model=gpt-4o  key=已设置(sk-abc…7f21)","ms":0},
+    {"name":"网络连通","ok":true,"detail":"已连通 x（HTTP 200，132 ms）","ms":132},
+    {"name":"接口鉴权","ok":true,"detail":"HTTP 200，Authorization 已接受","ms":132},
+    {"name":"模型列表","ok":true,"detail":"发现 42 个模型，包含 gpt-4o","ms":132},
+    {"name":"流式对话","ok":true,"detail":"首字 480 ms，本次请求 1120 ms","ms":1120}
+  ],
+  "models": ["gpt-4o", "gpt-4o-mini"]
+}
+```
+
+失败示例（鉴权失败，`hint` 给出下一步动作；`steps` 依然是完整的 5 项）：
+
+```json
+{
+  "ok": false,
+  "verdict": "不可用：鉴权失败 (HTTP 401)",
+  "hint": "检查 API Key 是否正确、是否有该模型的权限（中转端点还要确认它是否支持 /models 接口）",
+  "steps": [
+    {"name":"配置检查","ok":true,"detail":"baseUrl=https://x/v1  model=gpt-4o  key=已设置(sk-abc…7f21)","ms":0},
+    {"name":"网络连通","ok":true,"detail":"已连通 x（HTTP 401）","ms":210},
+    {"name":"接口鉴权","ok":false,"detail":"HTTP 401 {\"error\":\"invalid key\"}","ms":210},
+    {"name":"模型列表","ok":false,"detail":"未执行（上一步失败）","ms":0},
+    {"name":"流式对话","ok":false,"detail":"未执行（上一步失败）","ms":0}
+  ],
+  "models": []
+}
+```
+
+- 字段说明：`ok`(bool，全部 5 步通过才为 true)、`verdict`(一句话结论，可直接展示)、`hint`(下一步建议，可能为空串)、`steps[].ms`(该步骤耗时毫秒，未执行时为 0)、`models`(远端返回的模型 id 列表，解析不到时为空数组)。
+- 结论（一行摘要）会写进 `IAGLogPath()` 指向的 `iagent.log`，前缀是 `模型体检:`。
+
+```bash
+curl -s -X POST "$BASE/api/model/check" \
+  -H 'Content-Type: application/json' -H "X-IAG-Token: $TOKEN" \
+  -d '{"baseUrl":"https://api.deepseek.com/v1","model":"deepseek-chat"}'
+```
+
+### 3.6 `GET /api/sessions`
 
 - 响应 200：**裸数组**（不是对象包装），按 `updatedAt` 倒序，每项是会话摘要。
 
@@ -322,13 +417,13 @@ curl -s -X POST http://127.0.0.1:8080/api/config \
 ]
 ```
 
-### 3.5 `POST /api/sessions`
+### 3.7 `POST /api/sessions`
 
 - 请求体（可选）：`{ "title": "…" }`。省略、nil 或空串时标题为 `新会话`。
 - 响应 200：新建会话的摘要（同上一节的单个对象）。会话 id 形如 `s-<自增序号>-<Unix 秒>`。
 - 其它方法 → 405 `{"error":"仅支持 GET/POST"}`。
 
-### 3.6 `GET|PATCH|POST|DELETE /api/sessions/<id>`
+### 3.8 `GET|PATCH|POST|DELETE /api/sessions/<id>`
 
 路径 id 会被百分号解码；`/api/sessions/`（缺 id）→ 400 `{"error":"缺少会话 id"}`。
 
@@ -360,7 +455,7 @@ curl -s -X POST http://127.0.0.1:8080/api/config \
 }
 ```
 
-### 3.7 `POST /api/chat`
+### 3.9 `POST /api/chat`
 
 - 仅 `POST`（其它方法 → 405 `{"error":"仅支持 POST"}`）；请求体必须是 JSON 对象，否则 400 `{"error":"请求体必须是 JSON 对象"}`。
 
@@ -370,7 +465,7 @@ curl -s -X POST http://127.0.0.1:8080/api/config \
 | `sessionId` | string | 否 | 缺省或找不到时**自动新建会话**，并把真实 id 放在响应/`session` 事件里 |
 | `stream` | bool | 否 | 默认 `true`（SSE）；显式 `false` 时走整段 JSON |
 
-#### 3.7.1 非流式（`"stream": false`）
+#### 3.9.1 非流式（`"stream": false`）
 
 响应 200：
 
@@ -395,9 +490,11 @@ curl -s -X POST http://127.0.0.1:8080/api/config \
 - `usage` 直接取自 `done` 事件：正常一轮一定带 `prompt_tokens` / `completion_tokens` / `total_tokens`（模型没汇报时是 0），被中止的一轮只带 `total_tokens`，完全没收到 `done` 时才是 `{}`。
 - 只要出现 `error` 事件（例如未配置 API Key、模型请求失败），响应就是 502 + `{"error":"<error 事件的 message>"}`。
 
-#### 3.7.2 流式（默认）
+#### 3.9.2 流式（默认）
 
 响应 `200` + `Content-Type: text/event-stream; charset=utf-8`，chunked 编码，事件格式见 [第 4 节](#4-sse-事件参考)。
+
+**收尾保证**：任何一次流式 `/api/chat` 都会**恰好以一个 `done` 事件结束**——包括预检失败的路径（`会话不存在`、`尚未配置 API Key`）和模型请求失败。这些路径先发 `error`，随后仍会补一个 `done`（带 `"partial": true` 与 `"reason": "error"`）。客户端因此不会把"服务端报错"误读成"连接被提前关闭 / 守护进程崩溃"。客户端断开后守护进程不会再往坏掉的 socket 写数据（写入失败即停止推送），并会安全地结束该事件流。
 
 ```bash
 curl -N -s -X POST http://127.0.0.1:8080/api/chat \
@@ -406,7 +503,7 @@ curl -N -s -X POST http://127.0.0.1:8080/api/chat \
   -d '{"sessionId":"s-3-1717043521","message":"列出 /var/mobile 下的文件","stream":true}'
 ```
 
-### 3.8 `POST /api/approve`
+### 3.10 `POST /api/approve`
 
 用于回答 `approval_required` 事件（详见 [第 5 节](#5-审批流程与中止)）。
 
@@ -414,14 +511,14 @@ curl -N -s -X POST http://127.0.0.1:8080/api/chat \
 - 请求体：`{ "id": "<工具调用 id>", "allow": true }`。`id` 就是 `approval_required` 事件里的 `id`；`allow` 缺失时按 `false`（拒绝）处理。
 - 200 `{"ok":true}`；`id` 为空、或不处于等待状态（含已超时）→ 404 `{"error":"没有等待中的审批请求（可能已超时）"}`。
 
-### 3.9 `POST /api/abort`
+### 3.11 `POST /api/abort`
 
 - 仅 `POST`（其它 → 405 `{"error":"仅支持 POST"}`）。
 - 请求体：`{ "sessionId": "s-3-1717043521" }`。
 - 语义：给该会话打上中止标记，并取消正在进行的模型 HTTP 请求。运行中的那一轮会在下一个检查点结束，并以带 `aborted: true` 的 `done` 事件收尾。
 - `sessionId` 为空或该会话并未运行：**仍然返回 200 `{"ok":true}`**（幂等，无副作用）。
 
-### 3.10 `GET /api/tools`
+### 3.12 `GET /api/tools`
 
 - 仅 `GET`（其它 → 405 `{"error":"仅支持 GET"}`）。
 - 响应 200：`{ "tools": [ … ] }`，按工具名排序。每个工具比 `/api/health` 多 `category` 和 `parameters`（原始 JSON Schema）。
@@ -451,7 +548,7 @@ curl -N -s -X POST http://127.0.0.1:8080/api/chat \
 
 `enabled` 来自 `toolsEnabled` 的类别开关；**被禁用的类别仍会列出来**，只是 `enabled: false`（禁用的工具不会出现在发给模型的 `tools` 里）。
 
-### 3.11 `POST /api/tools/call`
+### 3.13 `POST /api/tools/call`
 
 直接执行一个工具，不经模型、**不走审批**，只需要工具名和参数对象。
 
@@ -487,7 +584,7 @@ curl -s -X POST http://127.0.0.1:8080/api/tools/call \
 }
 ```
 
-### 3.12 `POST /api/exec`
+### 3.14 `POST /api/exec`
 
 一次性非交互 shell 命令（`/bin/sh -c` 之类，由 `IAGProcess runShell` 实现），没有 PTY——需要交互的程序请用终端接口。
 
@@ -517,7 +614,7 @@ curl -s -X POST http://127.0.0.1:8080/api/tools/call \
 - 超时被 SIGKILL 时 `timedOut: true`；进程启动失败时 `exitCode: -1` 且 `launchError` 非空。
 - **不检查黑名单、不做审批**（见 [第 8 节](#8-实现细节与已知偏差)）。
 
-### 3.13 终端 `/api/term/*`
+### 3.15 终端 `/api/term/*`
 
 真实 PTY 会话（优先 `forkpty`，否则 `posix_openpt`+`fork`）。输出放在 512 KB 环形缓冲里，用单调递增的字节游标寻址，客户端只要轮询 `read` 即可。
 
@@ -598,7 +695,7 @@ curl -s -X POST http://127.0.0.1:8080/api/tools/call \
 
 `{ "sessionId": "t1" }` → 200 `{"ok":true}`。先 `SIGHUP`，约 300 ms 内没退出再 `SIGKILL` 整个进程组。
 
-### 3.14 定时任务 `/api/cron`
+### 3.16 定时任务 `/api/cron`
 
 #### `GET /api/cron`
 
@@ -647,7 +744,7 @@ curl -s -X POST http://127.0.0.1:8080/api/tools/call \
 - `runNow` 是异步的：命令在调度队列里执行（超时 600 秒、输出上限 128 KB），响应会在命令结束前返回；结果之后写进 `lastRun` / `lastResult` / `lastExitCode` 并重算 `nextRun`。
 - 其它方法 → 405 `{"error":"不支持的方法"}`。
 
-### 3.15 日志 `/api/logs`
+### 3.17 日志 `/api/logs`
 
 #### `GET /api/logs?lines=N`
 
@@ -669,7 +766,7 @@ curl -s -X POST http://127.0.0.1:8080/api/tools/call \
 
 `/api/logs` 前缀下其它方法（含 `GET /api/logs/clear`）→ 405 `{"error":"不支持的方法"}`。
 
-### 3.16 桥接 API `/api/bridge`
+### 3.18 桥接 API `/api/bridge`
 
 守护进程自己不做触摸注入：UI 自动化必须由持有相应 entitlement 的 SpringBoard 插件执行。因此动作在守护进程侧排队，插件用长轮询取走、执行、再把结果回传。全部数据在内存里，不落盘。
 
@@ -734,7 +831,7 @@ curl -s -X POST http://127.0.0.1:8080/api/tools/call \
 
 插件的 `action` 由实现侧定义（当前支持 `ping`、`caps`、`notify`、`ui_describe`、`ui_tap`、`ui_type`、`ui_swipe`、`open_url`、`launch_app`）；`parameters` 是对应动作的参数对象。这些名字不在 HTTP 层校验，插件不认识的动作用结果里的 `error` 报告。
 
-### 3.17 静态文件（Web UI）
+### 3.19 静态文件（Web UI）
 
 任何**不以 `/api/` 开头**的路径都走静态文件服务：
 
@@ -785,7 +882,7 @@ data: <JSON>\n
 | `tool_call` | 模型请求调用一个工具（`phase = start`，不含增量阶段） | `id`、`name`、`arguments`（已解析的对象；解析失败时为 `{}`） |
 | `tool_result` | 每个工具执行完成（含被拒绝、被拦截、未知工具） | `id`、`name`、`ok`、`output`、`error`（非空时）、`durationMs`、`exitCode`（仅当工具结果里带该键；内置工具把退出码写在 `output` 文本里） |
 | `approval_required` | 工具命中审批策略、在阻塞等待用户决定之前 | `id`、`name`、`arguments`、`reason` |
-| `done` | 一轮运行结束 | 正常：`messageId`、`steps`、`toolCalls`、`contentLength`、`usage`；被中止时：`messageId`、`steps`、`aborted: true`、`usage` |
+| `done` | 一轮运行结束 | 正常：`messageId`、`steps`、`toolCalls`、`contentLength`、`usage`；被中止时：`messageId`、`steps`、`aborted: true`、`usage`；前端兜底补发时：`messageId`、`steps: 0`、`partial: true`、`reason`（`"error"` 或 `"unknown"`） |
 | `error` | 会话不存在、未配置 API Key、模型请求失败 | `message` |
 
 细节与边界：
@@ -794,8 +891,9 @@ data: <JSON>\n
 - `usage` 的三个键是 `prompt_tokens` / `completion_tokens` / `total_tokens`；中途中止时只带 `total_tokens`。
 - **`done.messageId` 实际就是会话 id**（不是单条消息的 id）。
 - 达到 `maxSteps` 时会先补一个 `delta`（附加说明文本）再发 `done`。
-- 模型请求失败会先发 `error`，随后**仍会发一个 `done`**（该轮 `steps: 0`、`toolCalls: 0`、`contentLength: 0`、`usage` 全 0）。只有「会话不存在」和「未配置 API Key」这两种情况是 `error` 之后直接结束、没有 `done`。
+- **每一轮流式对话都恰好以一个 `done` 收尾**（1.1.0 起的硬保证）：模型请求失败会先发 `error` 再发 `done`（`steps: 0`、`toolCalls: 0`、`contentLength: 0`、`usage` 全 0）；「会话不存在」「未配置 API Key」这两种预检失败同样是 `error` + `done`（1.0.3 及以前只发 `error` 就关流，客户端会误报"连接被提前关闭（daemon 可能被杀/崩溃）"）。如果某个事件流的 `done` 是路由层兜底补发的，它会带 `"partial": true` 和 `"reason"`，客户端据此知道这一轮并不完整。
 - 被中止的那一轮：`done` 带 `aborted: true`，`steps` 是中止时所处的步号。中止不会回滚已经写入的历史消息。
+- 客户端断开（浏览器关标签页）后：守护进程不再向已失效的 socket 推送事件（`stream.open` 变 `NO` 即停止），本轮 agent 循环照常跑完并释放连接线程；进程级 `SIGPIPE` 被忽略、每个客户端 socket 也设了 `SO_NOSIGPIPE`，因此**不会**因为写坏掉的 socket 而崩溃，也不会无限往坏 socket 写。
 
 ### 完整示例流
 

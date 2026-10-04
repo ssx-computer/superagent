@@ -24,11 +24,19 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!--
+        KeepAlive = true（无条件常驻）。这里以前是
+        <dict><key>SuccessfulExit</key><false/></dict>，语义是"只在退出码非 0 时重启"：
+        进程被信号打死（SIGSEGV/SIGBUS/SIGKILL）或被系统强制退出时，launchd 认为
+        "已经退出过、结果不是成功"，于是**不会把它拉起来**——用户看到的就是控制面板
+        再也连不上。改成 true 之后无论怎么退出都会被重新启动；配合下面的
+        ThrottleInterval=5 防止崩溃循环打满 CPU。
+        这个文件打包时会被 Theos 转成 binary plist，postinst 会用
+        usr/share/iagent/iagent.daemon.plist.template 重新生成一份文本版，
+        所以两处的 KeepAlive 必须一致。
+    -->
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
 
     <key>ThrottleInterval</key>
     <integer>5</integer>
