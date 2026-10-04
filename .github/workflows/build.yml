@@ -109,6 +109,8 @@ jobs:
 
       # make 会在第一个出错的文件上停下，一轮只能看到一个文件的问题。这里先对每个
       # 源文件单独做语法检查（-fsyntax-only，不产出目标文件），一次列出全部错误。
+      # 警告开关跟真实构建对齐（-Wall -Werror），否则像 -Wunused-function /
+      # 隐式函数声明这类问题只有到编译阶段才暴露，一轮 CI 只修一个文件。
       - name: 全量语法检查
         continue-on-error: true
         run: |
@@ -118,6 +120,7 @@ jobs:
           fail=0
           for f in daemon/*.m shared/*.m tweak/*.m; do
             out=$(clang -fsyntax-only -fobjc-arc \
+                    -Wall -Werror -Wno-unused-command-line-argument \
                     -I"$PWD/shared" -I"$PWD/daemon" -I"$PWD/tweak" \
                     -isysroot "$SDK" -target arm64-apple-ios15.0 \
                     -fmodules-cache-path=/tmp/iag-modules \

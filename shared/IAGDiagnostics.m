@@ -147,7 +147,10 @@ static BOOL IAGWriteMarkerBytes(const char *bytes, size_t length)
         IAGCloseMarker();
         return NO;
     }
-    fdatasync(gMarkerFD);
+    // 用 fsync 而不是 fdatasync：iOS 15 SDK 的 <unistd.h> 没有声明 fdatasync，
+    // clang 在 C99 起会直接报 implicit function declaration 错误；fsync 写元数据
+    // 更保守，对"崩溃后必须留下 marker"这件事只有好处。
+    fsync(gMarkerFD);
     return YES;
 }
 
@@ -162,7 +165,7 @@ static void IAGAppendCrashText(const char *bytes, size_t length)
         if (gCrashFD < 0) return;
     }
     IAGWriteAllFD(gCrashFD, bytes, length);
-    fdatasync(gCrashFD);
+    fsync(gCrashFD);                       // 同上：fdatasync 在 iOS SDK 里没有声明
 }
 
 /// 一行式时间戳，避免在信号处理函数里用 localtime_r 之外的分配。

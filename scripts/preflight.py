@@ -50,6 +50,16 @@ CHECKS = 0
 STATIC_FUNC_RE = re.compile(r'^static\s+[^;{=]*?\b(IAG[A-Za-z0-9_]*)\s*\(', re.M)
 STATIC_VAR_RE = re.compile(r'^static\s+[^;{]*?\b(kIAG[A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\s*=', re.M)
 
+# glibc/Linux 有而 Darwin（iOS SDK）没有：编译到 macOS 上会因"隐式函数声明"报错。
+# 只列确定不存在于 iOS SDK 的，宁可少列也不要误报（误报会让 checks job 变红）。
+LINUX_ONLY = (
+    "fdatasync", "sincos", "sincosf", "memrchr", "strchrnul", "canonicalize_file_name",
+    "eaccess", "execvpe", "clearenv", "mallinfo", "mallopt", "malloc_trim",
+    "pthread_yield", "get_nprocs", "sched_getaffinity", "secure_getenv",
+    "pipe2", "accept4", "signalfd", "eventfd", "epoll_create", "inotify_init", "ppoll",
+)
+LINUX_ONLY_RE = "|".join(LINUX_ONLY)
+
 
 def fail(area, message):
     FAILURES.append((area, message))
@@ -217,7 +227,15 @@ def check_objc(verbose):
                         fail("sources", "%s 里的 static %s %s 没有任何引用点（-Wunused-%s 会以 -Werror 失败）：删掉它，或补上调用点"
                              % (rel, kind, name, flag))
 
-    ok("sources", "%d 个源文件" % len(files), "检查了 %d 个 .m/.h 的引用、配平与未使用的 static" % len(files))
+        # Linux/glibc 有、Darwin 上没有（或没有声明）的函数。CI 是在 macOS 上编译的，
+        # clang 从 C99 起把"隐式函数声明"直接当错误，一轮 CI 只会告诉你第一个出问题的
+        # 文件，本地先扫一遍能省好几次推送（fdatasync 就是这么发现的）。
+        if path.endswith(".m"):
+            for symbol in sorted(set(re.findall(r'\b(%s)\s*\(' % LINUX_ONLY_RE, stripped))):
+                fail("sources", "%s 调用了 %s()，iOS/macOS 的 SDK 里没有这个函数（Darwin 编译会报 implicit function declaration）"
+                     % (rel, symbol))
+
+    ok("sources", "%d 个源文件" % len(files), "检查了 %d 个 .m/.h 的引用、配平、未使用的 static 与 Darwin 缺失函数" % len(files))
 
 
 # ---------------------------------------------------------------------------
