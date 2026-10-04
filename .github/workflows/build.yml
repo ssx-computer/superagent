@@ -234,7 +234,9 @@ jobs:
   # ---------------------------------------------------------------------------
   roothide:
     name: iAgent (RootHide · arm64e)
-    needs: checks
+    # 排在 rootless 之后：tag 构建时两个 job 都要往同一个 Release 里塞文件，
+    # 串行执行可以避免并发创建 Release 的竞争。
+    needs: [ checks, rootless ]
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -279,4 +281,11 @@ jobs:
           name: iagent-roothide-deb
           path: packages/*.deb
           if-no-files-found: warn
+          retention-days: 30
+
+      - name: 发布 Release（仅 tag，附上 arm64e 包）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/*.deb
           retention-days: 30
