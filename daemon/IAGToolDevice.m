@@ -332,26 +332,42 @@ static NSArray<NSDictionary *> *IAGInstalledApplications(void)
         return IAGToolSuccess([NSString stringWithFormat:@"已通过 SpringBoard 显示提示：%@", message]);
     }
 
-    // Fallback: a CoreFoundation user notification from this process.
-    SInt32 errorCode = 0;
-    NSDictionary *options = @{
-        (__bridge NSString *)kCFUserNotificationAlertHeaderKey: title,
-        (__bridge NSString *)kCFUserNotificationAlertMessageKey: message,
-        (__bridge NSString *)kCFUserNotificationAlertTopMostKey: @YES,
-        (__bridge NSString *)kCFUserNotificationDefaultButtonTitleKey: @"好",
-    };
-    CFUserNotificationRef notification = CFUserNotificationCreate(kCFAllocatorDefault,
-                                                                 (CFTimeInterval)duration,
-                                                                 kCFUserNotificationNoteAlertLevel,
-                                                                 &errorCode,
-                                                                 (__bridge CFDictionaryRef)options);
-    if (notification) {
-        CFRelease(notification);
-        return IAGToolSuccess([NSString stringWithFormat:@"已通过 CFUserNotification 显示提示（%@）: %@",
-                               bridged[@"error"] ?: @"桥接不可用", message]);
+    // Fallback: 用 CoreFoundation 的 user notification 在本进程弹一条提示。
+    // 这些符号在公开 iOS SDK 头文件里被标记为"iOS 不可用"，所以既不引用它的常量
+    // 也不做链接期依赖：用 dlsym 解析函数 + 自己写键名（值就是公开文档里的字符串）。
+    typedef CFTypeRef (*IAGUserNotificationCreateFn)(CFAllocatorRef, CFTimeInterval,
+                                                     CFOptionFlags, SInt32 *, CFDictionaryRef);
+    static IAGUserNotificationCreateFn createFn = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *handle = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+                              RTLD_LAZY);
+        createFn = (IAGUserNotificationCreateFn)dlsym(handle ?: RTLD_DEFAULT,
+                                                      "CFUserNotificationCreate");
+    });
+
+    if (createFn) {
+        SInt32 errorCode = 0;
+        NSDictionary *options = @{
+            @"AlertHeader": title,
+            @"AlertMessage": message,
+            @"AlertTopMost": @YES,
+            @"DefaultButtonTitle": @"好",
+        };
+        // kCFUserNotificationNoteAlertLevel == 1
+        CFTypeRef notification = createFn(kCFAllocatorDefault, (CFTimeInterval)duration, 1,
+                                          &errorCode, (__bridge CFDictionaryRef)options);
+        if (notification) {
+            CFRelease(notification);
+            return IAGToolSuccess([NSString stringWithFormat:@"已通过 CFUserNotification 显示提示（%@）: %@",
+                                   bridged[@"error"] ?: @"桥接不可用", message]);
+        }
+        return IAGToolFailure([NSString stringWithFormat:@"无法显示提示（%@，CFUserNotification 错误码 %d）",
+                               bridged[@"error"] ?: @"桥接不可用", (int)errorCode]);
     }
-    return IAGToolFailure([NSString stringWithFormat:@"无法显示提示（%@，CFUserNotification 错误码 %d）",
-                           bridged[@"error"] ?: @"桥接不可用", (int)errorCode]);
+
+    return IAGToolFailure([NSString stringWithFormat:@"无法显示提示：%@（且本进程拿不到 CFUserNotification）",
+                           bridged[@"error"] ?: @"SpringBoard 桥接未连接"]);
 }
 
 @end

@@ -291,10 +291,10 @@ static NSDictionary *IAGHTTPJSON(NSString *method, NSString *urlString, NSDictio
     center.y = MAX(half + 40, MIN(CGRectGetHeight(bounds) - half - 40, center.y));
     _bubbleView.center = center;
 
-    if (pan.state == UIPanGestureRecognizerStateBegan) _dragged = YES;
+    if (pan.state == UIGestureRecognizerStateBegan) _dragged = YES;
 
-    if (pan.state == UIPanGestureRecognizerStateEnded ||
-        pan.state == UIPanGestureRecognizerStateCancelled) {
+    if (pan.state == UIGestureRecognizerStateEnded ||
+        pan.state == UIGestureRecognizerStateCancelled) {
         BOOL leftSide = center.x < CGRectGetWidth(bounds) / 2.0;
         [[IAGConfig shared] applyPatch:@{
             kIAGKeyTopButtonSide: leftSide ? @"left" : @"right",
@@ -316,7 +316,7 @@ static NSDictionary *IAGHTTPJSON(NSString *method, NSString *urlString, NSDictio
 
 - (void)bubbleLongPressed:(UILongPressGestureRecognizer *)press
 {
-    if (press.state != UILongPressGestureRecognizerStateBegan) return;
+    if (press.state != UIGestureRecognizerStateBegan) return;
     if (_dragged) return;
 
     UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"iAgent"
