@@ -187,9 +187,17 @@ jobs:
           set -e
           DEB=$(ls packages/*.deb | head -n 1)
           if command -v dpkg-deb >/dev/null 2>&1; then
-            dpkg-deb -f "$DEB" Package Architecture Version Depends
+            dpkg-deb -f "$DEB"
             ARCH=$(dpkg-deb -f "$DEB" Architecture)
             test "$ARCH" = "iphoneos-arm64" || { echo "Architecture 应为 iphoneos-arm64，实际 $ARCH"; exit 1; }
+            PKG=$(dpkg-deb -f "$DEB" Package)
+            test "$PKG" = "com.dsh.iagent" || { echo "Package 名不对: $PKG"; exit 1; }
+            # 字段不能重复（layout/DEBIAN/control 里写 Installed-Size 会和 Theos
+            # 自动追加的那行撞车，dpkg 会拒绝安装）。
+            DUP=$(dpkg-deb -f "$DEB" | sed -n 's/^\([A-Za-z][A-Za-z-]*\):.*/\1/p' | sort | uniq -d)
+            test -z "$DUP" || { echo "control 有重复字段: $DUP"; exit 1; }
+            dpkg-deb -f "$DEB" Depends | grep -q 'firmware (>= 15.0)' || { echo "Depends 缺少 firmware (>= 15.0)"; exit 1; }
+            echo "包元数据检查通过"
           else
             echo "::warning::没有 dpkg-deb，跳过元数据校验"
           fi

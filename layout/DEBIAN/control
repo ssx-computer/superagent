@@ -6,10 +6,8 @@ Description: 原生 iOS AI Agent：终端、文件、App、UI 自动化与定时
 Depends: firmware (>= 15.0)
 Section: Tweaks
 Priority: optional
-Maintainer: DSH
-Author: DSH
-Homepage: https://github.com/dsh/iagent
-Depiction: https://github.com/dsh/iagent
-Icon: https://raw.githubusercontent.com/dsh/iagent/main/docs/icon.png
+Maintainer: ssx-computer
+Author: ssx-computer
+Homepage: https://github.com/ssx-computer/superagent
+Depiction: https://github.com/ssx-computer/superagent
 Tag: purpose::extension, role::enduser
-Installed-Size: 1024
