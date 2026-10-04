@@ -57,7 +57,7 @@ HTTP + SSE 控制面，并由它自己通过 HTTPS 调用 OpenAI 兼容的模型
 2. **安装**（已越狱的 iOS 15+ 设备）
    - 先用 `dpkg --print-architecture` 确认架构，装错架构 dpkg 会拒绝并可能留下「dpkg 已中断」；
    - Sileo / Zebra 里打开对应架构的 `.deb` → 安装；或
-   - `dpkg -i com.dsh.iagent_1.0.1_iphoneos-arm64.deb`。
+   - `dpkg -i com.dsh.iagent_1.1.0_iphoneos-arm64.deb`。
 3. **不要期待安装完自动 respring**：脚本故意不重启 SpringBoard（在 dpkg 事务里 respring 会把
    Sileo 和 dpkg 一起杀掉，弄坏 dpkg 状态）。守护进程装完就能用 —— Safari 打开
    `http://127.0.0.1:8080` 即可；悬浮球要你自己重启一次 SpringBoard 才出现。
@@ -130,6 +130,32 @@ SpringBoard 进程内（HID 注入需要 SpringBoard 自己的 entitlements）�
 
 面板有五个标签页：聊天、终端、工具、会话、设置（外加 daemon 日志弹窗），全部走同一条
 回环 API。
+
+---
+
+## 守护进程存活与模型体检
+
+**存活检测**：面板每 5 秒探一次 `/api/health`（页面切到后台时降到 15 秒），顶栏右侧的状态
+徽标显示「在线 / 检测中 / 掉线」，点一下立刻重测。连续 2 次探测失败才判定掉线——掉线时聊天页
+顶部出现常驻横幅（写明已经掉线多少秒）、发送按钮与输入框禁用、正在输出的回复会被中止；
+守护进程回来后提示「已恢复响应」。如果这期间它换过 `pid`（说明重启过），还会插一张卡片说明
+是第几次重启、上次退出是否干净、以及崩溃日志的最后几行。
+
+**为什么现在能常驻**：LaunchDaemon 的 `KeepAlive` 改成了**无条件** `<true/>`。早先是
+`{SuccessfulExit: false}`，语义是「只在退出码非 0 时重启」——被系统内存压力（jetsam）杀掉时
+退出码是 0，于是再也不起来。守护进程启动时写一个运行标记，下一次启动据此判断上次是否正常退出，
+并把累计重启次数与最后一次崩溃信号放进 `/api/health`（`pid` / `startedAt` / `restarts` /
+`lastCrash` / `lastExitClean`）。未捕获异常与致命信号（SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE/
+SIGTRAP）会在 `logs/iagentd-crash.log` 留下信号名与调用栈。
+
+**模型体检**（设置页「测试模型」）：不用先保存，按你正在填的 Base URL / API Key / 模型名真实发
+一次请求，分五步给结论 —— 配置检查 → 网络连通 → 接口鉴权（`GET <baseUrl>/models`）→ 模型列表
+里有没有你填的模型 → 流式对话是否真的收到 SSE 数据。自建中转最常见的问题是「HTTP 200 但没有
+SSE 数据」（反向代理缓冲吃掉了 `text/event-stream`），这一步会单独指出来。「拉取模型列表」可以
+把端点报告的模型 id 直接点进模型名输入框。
+
+排查真机问题时先看 [docs/troubleshooting.md](docs/troubleshooting.md)：第 0 节是一条把所有
+相关日志一次性收集完的命令。
 
 ---
 
@@ -271,7 +297,8 @@ PTY 的 512KB 环形缓冲与 8 会话上限、cron 的"启动 5 秒后首次、
   `scripts/preflight.py` 结构自检，再用 Theos + iOS SDK 编译并由 `dpkg-deb` 断言包内容
   （`iagentd`、`iagent.dylib`、Web UI、LaunchDaemon 是否都在，`postinst` 是否有执行位）。
   产物在 Actions 的 Artifacts 里；打 `v*` tag 会自动建 Release 并附上 `.deb`。
-  RootHide（arm64e）版本走手动触发（Actions → Run workflow → `roothide=true`）。
+  每次 push 都会同时编 **rootless（`iphoneos-arm64`）与 RootHide（`iphoneos-arm64e`）两个包**
+  ——RootHide 不再需要手动触发，两个 job 会把各自的 `.deb` 附到同一个 Release 上。
 - 许可：仓库根目录的 [Apache License 2.0](https://github.com/ssx-computer/superagent/blob/main/LICENSE)
   覆盖本仓库代码。**注意**：修改系统私有 API、以 root 权限运行命令带来的一切后果由使用者自行承担；
   本项目仅供在自有设备上研究与自动化使用。

@@ -65,24 +65,24 @@ typedef void (^IAGLLMToolCallBlock)(NSString *phase, IAGToolCall *call);   // ph
 /// GET <baseUrl>/models，返回模型 id 数组（顺序与远端一致）。
 /// baseURL 与 apiKey 显式传入，方便体检时用前端给的临时值而不动共享配置。
 /// 失败时返回 nil，并把原因写进 *error / *statusCode（statusCode 为 0 表示连接层失败）。
-+ (nullable NSArray<NSString *> *)fetchModelIdentifiersWithBaseURL:(NSString *)baseURL
-                                                            apiKey:(NSString *)apiKey
-                                                          statusCode:(NSInteger *)statusCode
-                                                               error:(NSError **)error;
++ (nullable NSArray<NSString *> *)fetchModelIdentifiersWithBaseURL:(NSString * _Nullable)baseURL
+                                                            apiKey:(NSString * _Nullable)apiKey
+                                                        statusCode:(NSInteger * _Nullable)statusCode
+                                                             error:(NSError * _Nullable * _Nullable)error;
 
 /// 极小的真实流式请求（max_tokens 1、messages 一条 "hi"），验证"至少收到一个 SSE delta"。
 /// 注意：**不重试、不降级**——体检要如实反映端点的行为。
 /// 返回 YES 表示真的收到了流式数据；返回 NO 时 *error 说明原因，*sawSSEEvent 说明
 /// 是否"HTTP 200 但一个 SSE 事件都没有"（典型的中转端点忽略 stream:true）。
 /// firstDeltaMs 是首个 delta 的耗时（毫秒，收不到时为 0），totalMs 是整次请求耗时。
-+ (BOOL)probeStreamingWithBaseURL:(NSString *)baseURL
-                           apiKey:(NSString *)apiKey
-                            model:(NSString *)model
-                     firstDeltaMs:(NSInteger *)firstDeltaMs
-                          totalMs:(NSInteger *)totalMs
-                      sawSSEEvent:(BOOL *)sawSSEEvent
-                        statusCode:(NSInteger *)statusCode
-                             error:(NSError **)error;
++ (BOOL)probeStreamingWithBaseURL:(NSString * _Nullable)baseURL
+                           apiKey:(NSString * _Nullable)apiKey
+                            model:(NSString * _Nullable)model
+                     firstDeltaMs:(NSInteger * _Nullable)firstDeltaMs
+                          totalMs:(NSInteger * _Nullable)totalMs
+                      sawSSEEvent:(BOOL * _Nullable)sawSSEEvent
+                       statusCode:(NSInteger * _Nullable)statusCode
+                            error:(NSError * _Nullable * _Nullable)error;
 
 @end
 
