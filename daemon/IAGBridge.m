@@ -126,14 +126,14 @@ static const NSTimeInterval kIAGConnectedWindow  = 20;
 
     [_condition lock];
     _lastPollAt = [NSDate date].timeIntervalSince1970;
-    NSArray<IAGBridgeCommand *> *ready = [self readyCommandsSince:cursor locked];
+    NSArray<IAGBridgeCommand *> *ready = [self readyCommandsSince:cursor locked:YES];
 
     if (ready.count == 0 && wait > 0) {
         NSTimeInterval remaining = deadline - [NSDate date].timeIntervalSince1970;
         if (remaining > 0) {
             [_condition waitUntilDate:[NSDate dateWithTimeIntervalSinceNow:remaining]];
         }
-        ready = [self readyCommandsSince:cursor locked];
+        ready = [self readyCommandsSince:cursor locked:YES];
     }
 
     NSMutableArray *payload = [NSMutableArray array];
@@ -154,6 +154,7 @@ static const NSTimeInterval kIAGConnectedWindow  = 20;
 
 - (NSArray<IAGBridgeCommand *> *)readyCommandsSince:(NSUInteger)cursor locked:(BOOL)locked
 {
+    (void)locked;   // 调用方已持锁，这里只是把约定写进签名
     NSMutableArray *ready = [NSMutableArray array];
     for (IAGBridgeCommand *command in _commands) {
         if (command.delivered) continue;
