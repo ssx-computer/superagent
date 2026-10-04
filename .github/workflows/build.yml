@@ -164,7 +164,9 @@ jobs:
 
           echo "$LIST" | grep -q 'usr/bin/iagentd'              || { echo "iagentd 缺失"; exit 1; }
           echo "$LIST" | grep -q 'DynamicLibraries/iagent.dylib' || { echo "tweak 缺失"; exit 1; }
+          echo "$LIST" | grep -q 'DynamicLibraries/iagent.plist' || { echo "注入过滤器 plist 缺失"; exit 1; }
           echo "$LIST" | grep -q 'usr/share/iagent/web/index.html' || { echo "Web UI 缺失"; exit 1; }
+          echo "$LIST" | grep -q 'usr/share/iagent/web/app.js'   || { echo "Web UI app.js 缺失"; exit 1; }
           echo "$LIST" | grep -q 'LaunchDaemons/com.dsh.iagent.daemon.plist' || { echo "LaunchDaemon 缺失"; exit 1; }
 
           # 维护脚本必须是可执行的，否则 dpkg 不会运行 postinst

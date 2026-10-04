@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Theos 的 tweak staging 步骤要求在项目根目录（与 Makefile 同级）能找到这个过滤器
+    plist，文件名必须等于 TWEAK_NAME（iagent.plist）或 Filter.plist。
+
+    内容必须与 layout/Library/MobileSubstrate/DynamicLibraries/iagent.plist 保持一致：
+    前者给 Theos 打包用，后者是打进 .deb 的那一份（照抄一份是为了不再依赖 Theos 的
+    版本差异 —— 有的版本只认根目录，有的两处都会装）。
+
+    只注入 SpringBoard：悬浮球、HID 注入与 AX 读屏都只在这里有意义。
+-->
+<plist version="1.0">
+<dict>
+    <key>Filter</key>
+    <dict>
+        <key>Bundles</key>
+        <array>
+            <string>com.apple.springboard</string>
+        </array>
+    </dict>
+</dict>
+</plist>
