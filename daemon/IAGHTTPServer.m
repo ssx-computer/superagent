@@ -696,7 +696,7 @@ static const char *IAGStatusText(NSInteger status)
             }
 
             if (stream.started) {
-                stream.end;
+                [stream end];
                 break;   // the streaming response owns the connection
             }
 

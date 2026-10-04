@@ -10,6 +10,7 @@
 #define IAG_UTIL_H
 
 #import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>   // dispatch_block_t in IAGRunOnMainSync()
 
 #ifdef __cplusplus
 extern "C" {
