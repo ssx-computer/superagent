@@ -11,13 +11,8 @@
 
 #pragma mark - tool call
 
-@interface IAGToolCall ()
-@property (nonatomic, copy, readwrite) NSString *callId;
-@property (nonatomic, copy, readwrite) NSString *name;
-@property (nonatomic, copy, readwrite) NSString *arguments;
-@property (nonatomic, assign, readwrite) NSInteger index;
-@end
-
+// 注意：IAGToolCall 的属性在公共头文件里已经是可读写的，这里不能再"重新声明"
+// （类扩展里重复声明只允许在 primary 是 readonly、扩展是 readwrite 时使用）。
 @implementation IAGToolCall
 
 - (NSDictionary *)parsedArguments

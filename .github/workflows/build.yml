@@ -114,7 +114,8 @@ jobs:
         run: |
           set -e
           chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm
-          make clean package FINALPACKAGE=1
+          # -k：某个文件报错也继续编译其余文件，一次 CI 就能看到全部编译错误。
+          make -k clean && make -k package FINALPACKAGE=1
           ls -l packages/
 
       - name: 检查包内容
@@ -229,7 +230,7 @@ jobs:
         run: |
           set -e
           chmod +x layout/DEBIAN/postinst layout/DEBIAN/prerm
-          make clean package FINALPACKAGE=1 IAG_ROOTHIDE=1 ARCHS=arm64e
+          make -k clean && make -k package FINALPACKAGE=1 IAG_ROOTHIDE=1 ARCHS=arm64e
           ls -l packages/
           DEB=$(ls packages/*.deb | head -n 1)
           command -v dpkg-deb >/dev/null 2>&1 && dpkg-deb -f "$DEB" Package Architecture Version Depends || true
