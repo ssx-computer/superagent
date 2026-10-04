@@ -37,6 +37,9 @@ jobs:
       - name: 运行 scripts/preflight.py
         run: python3 scripts/preflight.py --verbose
 
+      - name: 前端错误路径测试（scripts/webtest.js）
+        run: node scripts/webtest.js
+
       - name: 关键文件与维护脚本格式
         run: |
           set -eu

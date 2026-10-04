@@ -1,6 +1,6 @@
 Package: com.dsh.iagent
 Name: iAgent
-Version: 1.0.2
+Version: 1.0.3
 Architecture: iphoneos-arm64
 Description: 原生 iOS AI Agent：终端、文件、App、UI 自动化与定时任务
 Depends: firmware (>= 15.0)

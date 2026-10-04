@@ -49,7 +49,7 @@ endif
 PACKAGE_ID          = com.dsh.iagent
 PACKAGE_NAME        = iAgent
 THEOS_PACKAGE_NAME  = com.dsh.iagent
-PACKAGE_VERSION     = 1.0.2
+PACKAGE_VERSION     = 1.0.3
 PACKAGE_DESCRIPTION = 原生 iOS AI Agent：常驻守护进程 + SpringBoard 悬浮球与 Web 控制面板，支持终端、文件、应用、通知、定时任务与界面自动化。
 PACKAGE_MAINTAINER  = dsh <dsh@localhost>
 PACKAGE_SECTION     = Tweaks

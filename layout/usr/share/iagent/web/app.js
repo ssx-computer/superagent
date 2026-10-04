@@ -604,12 +604,39 @@ function appendRetryCard(text, reason) {
     sendMessage(text);
   };
   card.appendChild(button);
-  appendChatCard(card);
+  // 这里必须用模块级的 appendToChat：appendChatCard 是 streamChat 的局部函数，
+  // 在外面调用会抛 "appendChatCard is not defined"，把真正的错误信息顶掉。
+  appendToChat(card);
 }
 
 function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
   var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   state.streamAbort = controller;
+
+  // ⚠️ 这些必须在 .then/.catch 之外定义：下面的错误分支也要用它们。
+  // 之前它们写在 .then 回调内部，于是任何错误都会先抛
+  // "Can not find variable: stopStreaming"，把真正的错误提示吞掉。
+  var assistantBubble = assistantNode ? assistantNode.querySelector('.bubble') : null;
+  var watchdog = null;
+  var finished = false;
+
+  function clearWaiting() {
+    if (waiting && waiting.parentNode) waiting.parentNode.removeChild(waiting);
+    waiting = null;
+  }
+
+  function stopStreaming() {
+    if (watchdog) { clearInterval(watchdog); watchdog = null; }
+    if (assistantBubble) assistantBubble.classList.remove('streaming');
+    clearWaiting();
+  }
+
+  // Tool cards / approvals / errors are siblings of the message bubble — the
+  // stylesheet gives them their own margins inside .chat-list.
+  function appendChatCard(node) {
+    if (assistantNode && assistantNode.parentNode) assistantNode.parentNode.insertBefore(node, assistantNode);
+    else appendToChat(node);
+  }
 
   return apiFetch('/api/chat', {
     method: 'POST',
@@ -635,23 +662,9 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
     var pendingRender = null;
     var content = '';
     var pendingText = '';
-    var assistantBubble = assistantNode.querySelector('.bubble');
     var lastActivity = Date.now();   // 任何字节到达都算活跃（含心跳注释）
     var firstOutput = false;
     var sawDone = false;
-    var finished = false;
-    var watchdog = null;
-
-    function clearWaiting() {
-      if (waiting && waiting.parentNode) waiting.parentNode.removeChild(waiting);
-      waiting = null;
-    }
-
-    function stopStreaming() {
-      if (watchdog) { clearInterval(watchdog); watchdog = null; }
-      if (assistantBubble) assistantBubble.classList.remove('streaming');
-      clearWaiting();
-    }
 
     // 守护进程每 10 秒发一次心跳，所以"45 秒一个字节都没有"只可能是连接死了
     // （iagentd 崩溃/被杀/被挂起）。这种情况以前会默默停住什么都不显示，现在必须报错。
@@ -667,13 +680,6 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
         toast('连接中断', 'err');
       }
     }, 1000);
-
-    // Tool cards / approvals / errors are siblings of the message bubble — the
-    // stylesheet gives them their own margins inside .chat-list.
-    function appendChatCard(node) {
-      if (assistantNode && assistantNode.parentNode) assistantNode.parentNode.insertBefore(node, assistantNode);
-      else appendToChat(node);
-    }
 
     function flushText() {
       if (pendingRender) return;
@@ -795,7 +801,8 @@ function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
   }).catch(function (error) {
     if (error && error.name === 'AbortError') {
       stopStreaming();
-      if (assistantBubble) assistantBubble.appendChild(el('div', 'muted', '已停止生成'));
+      // 看门狗已经报过错了就别再说"已停止生成"，否则像用户自己点的停止
+      if (!finished && assistantBubble) assistantBubble.appendChild(el('div', 'muted', '已停止生成'));
       return;
     }
     stopStreaming();
