@@ -9,8 +9,8 @@
 #ifndef IAG_VERSION_H
 #define IAG_VERSION_H
 
-#define IAG_VERSION_STRING      @"1.0.1"
-#define IAG_BUILD_STRING        @"2"
+#define IAG_VERSION_STRING      @"1.0.2"
+#define IAG_BUILD_STRING        @"3"
 #define IAG_BUNDLE_ID           @"com.dsh.iagent"
 #define IAG_DAEMON_LABEL        @"com.dsh.iagent.daemon"
 #define IAG_DAEMON_BINARY       @"iagentd"

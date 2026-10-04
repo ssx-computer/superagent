@@ -199,6 +199,10 @@ static const NSUInteger kIAGToolOutputLimit = 16000;
       eventHandler:(IAGAgentEventBlock)eventHandler
 {
     void (^emit)(NSString *, NSDictionary *) = ^(NSString *event, NSDictionary *payload) {
+        // 界面看到的错误也要落日志：用户报"没反应"时，日志是唯一能定位的东西。
+        if ([event isEqualToString:@"error"]) {
+            IAGLogError(@"会话 %@ 出错: %@", sessionId, payload[@"message"] ?: @"");
+        }
         if (eventHandler) eventHandler(event, payload ?: @{});
     };
 

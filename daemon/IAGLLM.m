@@ -112,10 +112,10 @@
 
 - (void)URLSession:(NSURLSession *)session dataTask:(NSURLSessionDataTask *)dataTask didReceiveData:(NSData *)data
 {
-    if (!self.streaming) {
-        if (self.rawBody.length < 256 * 1024) [self.rawBody appendData:data];
-        return;
-    }
+    // 无论状态码都留一份原始 body（上限 1 MB）：端点可能不理会 stream:true，直接返回
+    // 一整段 JSON，那时 SSE 解析器一个事件都收不到，只能靠原文兜底解析。
+    if (self.rawBody.length < 1024 * 1024) [self.rawBody appendData:data];
+    if (!self.streaming) return;
     [self consumeBytes:data];
 }
 
@@ -323,7 +323,9 @@
 {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[self endpointURL]];
     request.HTTPMethod = @"POST";
-    request.timeoutInterval = 600;
+    // 空闲超时：流式响应里这是"两个数据包之间"的上限。原来写 600 秒，
+    // 结果是用户发消息后界面十分钟什么都不显示 —— 时间必须短到能当错误报出来。
+    request.timeoutInterval = 60;
     [request setValue:@"application/json" forKey:@"Content-Type"];
     [request setValue:@"text/event-stream" forKey:@"Accept"];
     [request setValue:@"iAgent/1.0 (iOS)" forKey:@"User-Agent"];
@@ -352,8 +354,8 @@
     NSMutableURLRequest *request = [self requestWithBody:body];
 
     NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    configuration.timeoutIntervalForRequest = 600;
-    configuration.timeoutIntervalForResource = 1800;
+    configuration.timeoutIntervalForRequest = 60;    // 空闲 60 秒即失败
+    configuration.timeoutIntervalForResource = 300;  // 单次请求最长 5 分钟（长回答也够）
     configuration.HTTPShouldUsePipelining = NO;
     configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
 
@@ -378,13 +380,18 @@
 
     // Never block the agent loop forever, even if the network stack misbehaves.
     long waitResult = dispatch_semaphore_wait(session.semaphore,
-                                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1800 * NSEC_PER_SEC)));
+                                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(320 * NSEC_PER_SEC)));
     if (waitResult != 0) {
         [task cancel];
         [urlSession invalidateAndCancel];
         self.currentTask = nil;
         self.currentSession = nil;
-        if (error) *error = [self errorWithMessage:@"模型请求超时" code:-1001];
+        if (error) {
+            *error = [self errorWithMessage:[NSString stringWithFormat:
+                @"模型请求超时（%ld 秒内没有完成）。地址 %@\n可能原因：base_url 不可达、被网络拦截、"
+                @"或模型本身太慢。", (long)320, [self endpointURL].absoluteString]
+                                       code:-1001];
+        }
         return nil;
     }
     self.currentTask = nil;
@@ -411,23 +418,59 @@
         } else if (status == 429) {
             message = [NSString stringWithFormat:@"请求过于频繁或额度不足 (HTTP 429)。\n%@", bodyText];
         } else if (status == 0) {
-            message = [NSString stringWithFormat:@"无法连接 %@（网络或地址错误）%@",
+            message = [NSString stringWithFormat:@"无法连接 %@\n%@ [%@ %ld]",
                        [self endpointURL].absoluteString,
-                       session.transportError.localizedDescription ?: @""];
+                       session.transportError.localizedDescription ?: @"网络不可达",
+                       session.transportError.domain ?: @"NSURLErrorDomain",
+                       (long)session.transportError.code];
         } else {
             message = [NSString stringWithFormat:@"模型返回 HTTP %ld\n%@", (long)status, bodyText];
         }
+        IAGLogError(@"模型请求失败: %@", message);
         if (error) *error = [self errorWithMessage:message code:status ?: 1];
         return nil;
     }
 
     if (session.transportError && session.content.length == 0 && session.toolCallsByIndex.count == 0) {
-        if (error) {
-            *error = [self errorWithMessage:[NSString stringWithFormat:@"连接中断: %@",
-                                             session.transportError.localizedDescription]
-                                       code:session.transportError.code];
-        }
+        NSString *message = [NSString stringWithFormat:@"连接中断: %@ [%@ %ld]",
+                             session.transportError.localizedDescription ?: @"未知",
+                             session.transportError.domain ?: @"NSURLErrorDomain",
+                             (long)session.transportError.code];
+        IAGLogError(@"%@", message);
+        if (error) *error = [self errorWithMessage:message code:session.transportError.code];
         return nil;
+    }
+
+    // 兜底：有些自建/中转端点不理会 stream:true，直接返回一整段非流式 JSON。这种情况下
+    // SSE 解析器收不到任何事件，用户看到的就是"发了消息毫无反应"。这里把原文按
+    // OpenAI 非流式响应解析出来，并当作 delta 推给界面。
+    if (session.content.length == 0 && session.toolCallsByIndex.count == 0 && session.rawBody.length > 0) {
+        id json = IAGJSONDecode(session.rawBody, NULL);
+        NSDictionary *choice = nil;
+        if ([json isKindOfClass:[NSDictionary class]]) {
+            NSArray *choices = json[@"choices"];
+            if ([choices isKindOfClass:[NSArray class]] && choices.count > 0 &&
+                [choices.firstObject isKindOfClass:[NSDictionary class]]) {
+                choice = choices.firstObject;
+            }
+        }
+        NSDictionary *msg = [choice[@"message"] isKindOfClass:[NSDictionary class]] ? choice[@"message"] : nil;
+        NSString *reasonText = msg ? IAGDictStringAny(msg, @[ @"reasoning_content", @"reasoning" ], nil) : nil;
+        NSString *text = msg ? IAGDictStringAny(msg, @[ @"content" ], nil) : nil;
+        if (reasonText.length > 0 && delta) delta(@"reasoning", reasonText);
+        if (text.length > 0) {
+            [session.content appendString:text];
+            if (delta) delta(@"content", text);
+            IAGLogInfo(@"端点未按 SSE 返回，已按非流式响应解析出 %lu 字符",
+                       (unsigned long)text.length);
+        } else if (msg[@"tool_calls"]) {
+            IAGLogWarn(@"端点未按 SSE 返回，且带 tool_calls —— 非流式工具调用暂不支持");
+        } else {
+            NSString *preview = IAGTruncateString([[NSString alloc] initWithData:session.rawBody
+                                                                        encoding:NSUTF8StringEncoding] ?: @"", 200);
+            IAGLogWarn(@"端点返回 200，但既没有 SSE 事件也没有可解析内容（%lu 字节）：%@",
+                       (unsigned long)session.rawBody.length, preview);
+        }
     }
 
     [session emitToolCallEnds];

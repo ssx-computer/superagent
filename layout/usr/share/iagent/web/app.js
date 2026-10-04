@@ -556,14 +556,16 @@ function ensureSession() {
   });
 }
 
-function sendMessage() {
+function sendMessage(textOverride) {
   if (state.streaming) return;
   var input = $('chat-input');
-  var text = input.value.trim();
+  var text = (typeof textOverride === 'string' ? textOverride : input.value).trim();
   if (!text) return;
 
-  input.value = '';
-  input.style.height = 'auto';
+  if (typeof textOverride !== 'string') {
+    input.value = '';
+    input.style.height = 'auto';
+  }
   state.chatAutoScroll = true;
 
   ensureSession().then(function (sessionId) {
@@ -574,20 +576,38 @@ function sendMessage() {
     var assistantNode = el('div', 'msg assistant');
     var assistantBubble = el('div', 'bubble streaming');
     var assistantText = el('div', 'msg-text', '');
+    // 等待提示：模型慢或连不上时，界面上必须一直有东西在动，不能是一片空白。
+    var waiting = el('div', 'muted waiting-status', '已发送，正在连接模型…');
     assistantBubble.appendChild(assistantText);
+    assistantBubble.appendChild(waiting);
     assistantNode.appendChild(assistantBubble);
     appendToChat(assistantNode);
 
     setStreaming(true);
     state.abortRequested = false;
-    return streamChat(sessionId, text, assistantText, assistantNode);
+    return streamChat(sessionId, text, assistantText, assistantNode, waiting);
   }).catch(function (error) {
     setStreaming(false);
     toast(error.message || '发送失败', 'err');
+    appendChatCard(el('div', 'notice err', '发送失败：' + (error.message || '未知错误')));
   });
 }
 
-function streamChat(sessionId, message, assistantText, assistantNode) {
+/* 出错时给一个重试入口：把原文再发一次，而不是让用户重新手打。 */
+function appendRetryCard(text, reason) {
+  var card = el('div', 'notice err');
+  card.appendChild(el('span', '', reason + ' '));
+  var button = el('button', 'btn btn-small', '重试');
+  button.type = 'button';
+  button.onclick = function () {
+    if (card.parentNode) card.parentNode.removeChild(card);
+    sendMessage(text);
+  };
+  card.appendChild(button);
+  appendChatCard(card);
+}
+
+function streamChat(sessionId, message, assistantText, assistantNode, waiting) {
   var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   state.streamAbort = controller;
 
@@ -616,10 +636,37 @@ function streamChat(sessionId, message, assistantText, assistantNode) {
     var content = '';
     var pendingText = '';
     var assistantBubble = assistantNode.querySelector('.bubble');
+    var lastActivity = Date.now();   // 任何字节到达都算活跃（含心跳注释）
+    var firstOutput = false;
+    var sawDone = false;
+    var finished = false;
+    var watchdog = null;
+
+    function clearWaiting() {
+      if (waiting && waiting.parentNode) waiting.parentNode.removeChild(waiting);
+      waiting = null;
+    }
 
     function stopStreaming() {
+      if (watchdog) { clearInterval(watchdog); watchdog = null; }
       if (assistantBubble) assistantBubble.classList.remove('streaming');
+      clearWaiting();
     }
+
+    // 守护进程每 10 秒发一次心跳，所以"45 秒一个字节都没有"只可能是连接死了
+    // （iagentd 崩溃/被杀/被挂起）。这种情况以前会默默停住什么都不显示，现在必须报错。
+    watchdog = setInterval(function () {
+      var idle = Math.round((Date.now() - lastActivity) / 1000);
+      if (!firstOutput && waiting) waiting.textContent = '已发送，等待模型响应… ' + idle + 's';
+      if (idle >= 45 && !finished) {
+        finished = true;
+        stopStreaming();
+        try { if (controller) controller.abort(); } catch (e) {}
+        appendRetryCard(message, '连接中断：' + idle + ' 秒没有收到任何数据。iagentd 可能崩溃或被挂起' +
+          '（看 /var/mobile/Library/iAgent/logs/iagentd.err.log 与 iagent.log）。');
+        toast('连接中断', 'err');
+      }
+    }, 1000);
 
     // Tool cards / approvals / errors are siblings of the message bubble — the
     // stylesheet gives them their own margins inside .chat-list.
@@ -682,23 +729,42 @@ function streamChat(sessionId, message, assistantText, assistantNode) {
         appendChatCard(renderApprovalCard(payload));
         scrollChatToBottom();
       } else if (eventName === 'done') {
+        sawDone = true;
         if (pendingRender) { clearTimeout(pendingRender); pendingRender = null; }
         assistantText.textContent = content;
         stopStreaming();
+        // 空回复也算"有响应"，但要说清楚，不能让人以为是卡住了
+        if (!content.length) {
+          appendChatCard(el('div', 'notice', '模型返回了空内容（没有文本也没有工具调用）。' +
+            '通常是模型名不对、接口返回了非流式格式，或该模型不支持当前请求参数。'));
+        }
         state.messages.push({ role: 'assistant', content: content, createdAt: Date.now() / 1000 });
         loadSessions(true);
       } else if (eventName === 'error') {
-        appendChatCard(el('div', 'notice err', payload.message || '模型返回错误'));
+        firstOutput = true;
+        appendRetryCard(message, (payload.message || '模型返回错误') + '');
         stopStreaming();
       }
     }
 
+    function markOutput() {
+      lastActivity = Date.now();
+      if (!firstOutput) { firstOutput = true; clearWaiting(); }
+    }
+
     function pump() {
       return reader.read().then(function (chunk) {
+        lastActivity = Date.now();
         if (chunk.done) {
           if (pendingRender) { clearTimeout(pendingRender); pendingRender = null; }
           assistantText.textContent = content;
           stopStreaming();
+          // 流结束了却没有 done 事件 = daemon 半路没了。以前这里什么都不显示。
+          if (!sawDone && !finished) {
+            finished = true;
+            appendRetryCard(message, '连接被提前关闭：没有收到结束标记（daemon 可能崩溃/被杀，' +
+              '或模型连接中断）。内容可能不完整。');
+          }
           return;
         }
         buffer += decoder.decode(chunk.value, { stream: true });
@@ -715,7 +781,10 @@ function streamChat(sessionId, message, assistantText, assistantNode) {
             if (line.indexOf('event:') === 0) eventName = line.slice(6).trim();
             else if (line.indexOf('data:') === 0) dataLines.push(line.slice(5).trim());
           }
-          if (dataLines.length) handleEvent(eventName, dataLines.join('\n'));
+          if (dataLines.length) {
+            if (eventName !== 'done' && eventName !== 'error') markOutput();
+            handleEvent(eventName, dataLines.join('\n'));
+          }
           separator = buffer.indexOf('\n\n');
         }
         return pump();
